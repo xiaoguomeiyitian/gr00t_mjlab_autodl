@@ -1,0 +1,155 @@
+# ============================================================================
+# gr00t-mjlab 公共基础镜像 (Base)
+# 包含: CUDA + Python 3.12 + mjlab + gr00t 脚本
+# 三个变体 (collect/train/infer) 都基于此基础
+# ============================================================================
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+
+LABEL maintainer="gr00t-mjlab-autodl"
+LABEL description="gr00t-mjlab base image (CUDA 12.4 + mjlab + collect/convert scripts)"
+LABEL version="latest"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    GR00T_MJLAB_ROOT=/root/gr00t_mjlab_autodl \
+    UNITREE_ROOT=/root \
+    DATA_DIR=/root/data \
+    MODELS_DIR=/root/models \
+    VENV_PATH=/opt/venv
+
+ARG MIRROR=""
+ARG VERSION="latest"
+
+# ── 系统依赖 (可选国内镜像源) ────────────────────────────────────────────────
+RUN if [ "$MIRROR" = "cn" ]; then \
+        sed -i 's|http://archive.ubuntu.com|http://mirrors.aliyun.com|g' /etc/apt/sources.list && \
+        sed -i 's|http://security.ubuntu.com|http://mirrors.aliyun.com|g' /etc/apt/sources.list; \
+    fi
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        git git-lfs curl wget ca-certificates \
+        python3.12 python3.12-dev python3.12-venv \
+        python3-pip python3-setuptools python3-wheel \
+        build-essential cmake ninja-build pkg-config \
+        libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 \
+        libegl1-mesa libopengl0 \
+        cyclonedds-dev \
+        net-tools iputils-ping \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# ── Python 虚拟环境 ─────────────────────────────────────────────────────────
+RUN python3.12 -m venv ${VENV_PATH} \
+    && ${VENV_PATH}/bin/pip install --upgrade pip setuptools wheel \
+    && ${VENV_PATH}/bin/pip config set global.disable-pip-version-check true
+
+RUN if [ "$MIRROR" = "cn" ]; then \
+        ${VENV_PATH}/bin/pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
+        ${VENV_PATH}/bin/pip config set global.trusted-host mirrors.aliyun.com; \
+    fi
+
+ENV PATH="${VENV_PATH}/bin:${PATH}"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 公共 Python 依赖 (三个变体都需要)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── 1. unitree_sdk2_python (DDS 通信 SDK) ──────────────────────────────────
+COPY unitree_sdk2_python/ /root/unitree_sdk2_python/
+RUN pip install --no-cache-dir --only-binary=:all: "cyclonedds>=0.10.2" numpy opencv-python \
+    && cd /root/unitree_sdk2_python \
+    && pip install -e .
+
+# ── 2. unitree_rl_mjlab (仿真框架, 锁定 mujoco/warp/torch 版本) ────────────
+#   关键: Step 拆分为多个小 RUN, 避免单个 layer 过大导致 dockerd overlayfs commit 死锁
+COPY unitree_rl_mjlab/ /root/unitree_rl_mjlab/
+
+# 2a. 仿真库 (mujoco + warp-lang) - 约 200MB
+RUN pip install --no-cache-dir "mujoco>=3.5.0,<3.6.0" \
+    && pip install --no-cache-dir "warp-lang>=1.12.0,<1.13.0"
+
+# 2b-1. PyTorch 主包 (无 CUDA 依赖) - 约 850MB
+RUN pip install --no-cache-dir --no-deps \
+        --index-url https://download.pytorch.org/whl/cu128 \
+        "torch==2.11.0+cu128" \
+        "torchvision==0.26.0+cu128" \
+        "torchaudio==2.11.0+cu128"
+
+# 2b-2. CUDA 运行时 (cudnn + cublas + cufft + curand + cusparse + cusolver) - 约 2.5GB
+RUN pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cu128 \
+        "nvidia-cudnn-cu12==9.19.0.56" \
+        "nvidia-cublas-cu12==12.8.4.1" \
+        "nvidia-cufft-cu12==11.3.3.83" \
+        "nvidia-curand-cu12==10.3.9.90" \
+        "nvidia-cusparse-cu12==12.5.8.93" \
+        "nvidia-cusolver-cu12==11.7.3.90"
+
+# 2b-3. CUDA 通信 + 杂项 (nccl + nvshmem + nvjitlink + nvrtc + nvtx + cupti + cufile + cusparselt) - 约 1GB
+RUN pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cu128 \
+        "nvidia-nccl-cu12==2.28.9" \
+        "nvidia-nvshmem-cu12==3.4.5" \
+        "nvidia-nvjitlink-cu12==12.8.93" \
+        "nvidia-cuda-nvrtc-cu12==12.8.93" \
+        "nvidia-nvtx-cu12==12.8.90" \
+        "nvidia-cuda-cupti-cu12==12.8.90" \
+        "nvidia-cuda-runtime-cu12==12.8.90" \
+        "nvidia-cufile-cu12==1.13.1.3" \
+        "nvidia-cusparselt-cu12==0.7.1"
+
+# 2b-4. triton + cuda bindings/pathfinder - 约 200MB
+RUN pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cu128 \
+        "triton==3.6.0" \
+        "cuda-bindings==12.9.4" \
+        "cuda-pathfinder==1.2.2" \
+        "cuda-toolkit==12.8.1"
+
+# 2c. mjlab + unitree_rl_mjlab 及其依赖 (约 1GB)
+RUN cd /root/unitree_rl_mjlab \
+    && pip install --no-cache-dir -e .
+
+# 2d. mjlab 漏装的依赖 (scipy 等, mjlab.terrains.heightfield_terrains 需要 scipy.interpolate)
+RUN pip install --no-cache-dir \
+        "scipy>=1.11.0"
+
+# ── 3. gr00t_mjlab_autodl 源码 (含 .git/, 符合 AutoDL 镜像发布要求) ────────
+#   AutoDL 要求: /root/ 下必须是 Git 代码仓库, 能执行仓库中的简单代码
+COPY gr00t_mjlab_autodl/ /root/gr00t_mjlab_autodl/
+
+# 采集 + 转换所需的小型数据依赖
+RUN pip install --no-cache-dir \
+        pandas>=2.0.0 \
+        pyarrow>=14.0.0 \
+        tqdm \
+        huggingface-hub>=0.24.0
+
+# ── 4. 入口脚本 (各变体 CMD 不同, 共享 ENTRYPOINT) ────────────────────────
+COPY gr00t_mjlab_autodl/docker/scripts/ /usr/local/bin/
+RUN chmod +x /usr/local/bin/*.sh
+
+# ── 5. 运行时目录 ──────────────────────────────────────────────────────────
+RUN mkdir -p /root/data /root/models
+
+# ── 6. AutoDL 镜像合规验证 (进入仓库 + 简单代码执行) ─────────────────────
+#   验证要求: 能在 /root/gr00t_mjlab_autodl/ 下执行 Python 代码
+#   注意: 不在此处做 git 验证 (容器内无 host 端 git 历史, git log 会失败)
+#   项目布局: configs/ 在 src/ 下, src/ 才是 Python 包根
+#   不引用 mjlab.__version__ (mjlab 包没有该属性), 用 importlib.metadata 获取版本
+RUN cd /root/gr00t_mjlab_autodl && \
+    echo "--- 验证 Python 代码可执行 (AutoDL 合规) ---" && \
+    python3 -c "import sys; sys.path.insert(0, 'src'); from importlib.metadata import version; import mjlab; import configs.g1_config as g1c; import configs.go2_config as go2c; print(f'mjlab={version(\"mjlab\")}, g1_joints={g1c.G1_NUM_JOINTS}, go2_joints={go2c.GO2_NUM_JOINTS}'); print('AUTODL_BASE_OK')"
+
+WORKDIR ${GR00T_MJLAB_ROOT}
+
+# ── 健康检查 ───────────────────────────────────────────────────────────────
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD bash -c "cd ${GR00T_MJLAB_ROOT} && python3 -c 'import sys; sys.path.insert(0, \"src\"); import mjlab, mujoco, warp, torch, pandas, pyarrow; print(\"BASE_OK\")'" || exit 1
+
+CMD ["shell"]

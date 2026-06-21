@@ -1,0 +1,52 @@
+# ============================================================================
+# gr00t-mjlab 训练镜像
+# base + Python 3.10 (GR00T 要求) + 训练栈 (transformers/peft/bnb/accelerate) + Isaac-GR00T
+# ============================================================================
+FROM gr00t-mjlab-base:latest
+
+LABEL description="gr00t-mjlab training (Isaac-GR00T + LoRA + INT4)"
+
+# GR00T 需要 Python 3.10, 在 base 的 Python 3.12 之外额外安装
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.10 python3.10-dev python3.10-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# 用 uv 管理 GR00T 的 Python 3.10 环境
+#   注意: `uv venv` 默认不装 pip, 必须用 `uv pip install --python <venv>` 来安装包
+#   参考: https://docs.astral.sh/uv/pip/environments/
+RUN pip install --no-cache-dir uv
+ENV GR00T_VENV=/opt/gr00t-venv
+ENV UV_PYTHON=/usr/bin/python3.10
+# 创建 venv (不带 pip), 通过 uv 直接安装包
+RUN uv venv --python 3.10 ${GR00T_VENV} \
+    && uv pip install --python ${GR00T_VENV}/bin/python \
+        --upgrade pip setuptools wheel
+
+# GR00T 训练栈
+RUN uv pip install --python ${GR00T_VENV}/bin/python \
+        "transformers>=4.45.0" \
+        "accelerate>=0.34.0" \
+        "peft>=0.11.0" \
+        "bitsandbytes>=0.43.0" \
+        "datasets>=2.16.0" \
+        safetensors \
+        einops \
+        timm
+
+# 克隆并安装 Isaac-GR00T (首次构建需要 ~5min, 镜像发布要求 /root/ 下为 Git 仓库)
+ARG GR00T_REF="main"
+RUN git clone --depth 1 --recurse-submodules \
+        https://github.com/NVIDIA/Isaac-GR00T.git \
+        /root/Isaac-GR00T \
+    && cd /root/Isaac-GR00T \
+    && uv pip install --python ${GR00T_VENV}/bin/python -e . \
+    && echo "✅ Isaac-GR00T @ /root/Isaac-GR00T (commit: $(git rev-parse --short HEAD))"
+
+ENV PATH="${GR00T_VENV}/bin:${PATH}"
+
+# 健康检查 (训练栈完整 + /root/Isaac-GR00T 可达)
+HEALTHCHECK --interval=30s --timeout=30s --start-period=30s --retries=3 \
+    CMD bash -c "cd /root/Isaac-GR00T && ${GR00T_VENV}/bin/python -c 'import gr00t; import transformers; import peft; import bitsandbytes; print(\"TRAIN_OK\")'" || exit 1
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["train"]

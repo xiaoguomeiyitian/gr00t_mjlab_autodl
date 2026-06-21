@@ -1,0 +1,19 @@
+# ============================================================================
+# gr00t-mjlab 数据采集镜像
+# 最小化镜像, 仅 base + 数据采集 + 格式转换
+# 不含 GR00T/transformers/peft 等训练栈
+# ============================================================================
+FROM gr00t-mjlab-base:latest
+
+LABEL description="gr00t-mjlab data collection (no GR00T deps)"
+
+# 此镜像无需额外 Python 依赖 (base 已有 pandas/pyarrow/tqdm)
+# 仅配置默认入口
+
+# 健康检查 (验证 mjlab 可用)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python3 -c "import mjlab; from mjlab.tasks.registry import load_env_cfg; print('COLLECT_OK')" || exit 1
+
+# 默认模式: 数据采集
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["collect"]

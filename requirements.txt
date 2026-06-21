@@ -1,0 +1,18 @@
+# GR00T (云端训练) 依赖
+# 这些依赖在 AutoDL 云端训练时需要, 本地推理时可选
+
+# 基础模型 (训练 + 推理)
+transformers>=4.45.0
+accelerate>=0.34.0
+peft>=0.11.0
+bitsandbytes>=0.43.0
+
+# 数据格式 (本地 + 云端)
+pandas>=2.0.0
+pyarrow>=14.0.0
+
+# PyTorch (云端训练)
+# torch==2.5.0  # AutoDL 镜像已自带
+
+# HuggingFace 工具 (下载基础模型)
+huggingface-hub>=0.24.0
