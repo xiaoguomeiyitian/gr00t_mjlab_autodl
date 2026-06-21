@@ -48,6 +48,7 @@ SKIP_INT4=false            # 跳过 INT4 量化 (用 --no-export-int4)
 TUNE_LLM=false             # 官方默认 off (启用需 80GB+ VRAM)
 TUNE_VISUAL=false          # 官方默认 off (启用需 80GB+ VRAM)
 SAVE_ONLY_MODEL=true       # 只存模型权重 (省空间, 不可恢复训练)
+ACTION_MODE=""             # 动作空间: absolute | delta | relative_eef (留空: 从 data_dir/info.json 读)
 
 # 云端路径 (与 00_autodl_init.sh 保持一致)
 GR00T_REPO="/root/Isaac-GR00T"
@@ -76,6 +77,7 @@ while [[ $# -gt 0 ]]; do
         --tune-visual)      TUNE_VISUAL=true;      shift   ;;
         --save-only-model)  SAVE_ONLY_MODEL=true;  shift   ;;
         --no-save-only-model) SAVE_ONLY_MODEL=false; shift ;;
+        --action-mode)      ACTION_MODE="$2";      shift 2 ;;
         -h|--help)
             sed -n '2,32p' "$0"
             exit 0
@@ -196,6 +198,32 @@ else
 fi
 EPISODE_COUNT=$(find "$LEROBOT_DATA_DIR/data" -name "*.parquet" 2>/dev/null | wc -l)
 info "Episode 数: $EPISODE_COUNT"
+
+# ── 0.5: 读 modality.json + info.json, 检查 action_mode 一致性 ─────
+if [ -f "$LEROBOT_DATA_DIR/meta/modality.json" ]; then
+    info "modality.json: ✓"
+    if [ -z "$ACTION_MODE" ] && command -v python3 &>/dev/null; then
+        ACTION_MODE=$(python3 -c "
+import json
+m = json.load(open('$LEROBOT_DATA_DIR/meta/modality.json'))
+a = m.get('action', {})
+if 'joint_position_delta' in a: print('delta')
+elif 'ee_pose_delta' in a: print('relative_eef')
+elif 'joint_position_target' in a: print('absolute')
+else: print('absolute')
+" 2>/dev/null || echo "absolute")
+        info "从 modality.json 自动探测 action_mode = $ACTION_MODE"
+    fi
+fi
+[ -z "$ACTION_MODE" ] && ACTION_MODE="absolute"
+info "训练动作空间: $ACTION_MODE  (与采集时一致很重要!)"
+
+# 列出实际视频数量 (如有)
+VIDEO_COUNT=0
+if [ -d "$LEROBOT_DATA_DIR/videos/chunk-000" ]; then
+    VIDEO_COUNT=$(find "$LEROBOT_DATA_DIR/videos/chunk-000" -name "*.mp4" 2>/dev/null | wc -l)
+fi
+info "视频文件数: $VIDEO_COUNT"
 echo ""
 
 # ════════════════════════════════════════════════════════════════════════════

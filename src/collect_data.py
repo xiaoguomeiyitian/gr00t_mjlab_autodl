@@ -2,24 +2,43 @@
 """
 数据收集器 — 基于 unitree_rl_mjlab 官方仿真环境收集 G1/Go2 演示数据。
 
-使用 unitree_rl_mjlab 的 ManagerBasedRlEnv + 步态生成器产生演示，
-数据格式兼容 GR00T fine-tune 管线。
+**真实可用的 GR00T 训练数据采集**:
+  - 模式 1: --agent scripted   (正弦步态生成器, 用于 CI / smoke test)
+  - 模式 2: --agent random     (随机关节目标, 用于 sanity check)
+  - 模式 3: --agent trained    ⭐ 用训练好的 PPO 策略回放当专家示教
+  - 模式 4: --agent zero       (零动作, 用于验证管线)
+  - 模式 5: --agent keyboard   (手动遥操, 可选, 需要 display)
+
+**真实视觉采集**: --video 启用 mjlab rgb_array 渲染, 每个 episode 输出 mp4
+
+**动作空间**:
+  - --action-mode absolute     关节目标绝对位置 (与 mjlab JointPositionActionCfg 一致)
+  - --action-mode delta        ⭐ 关节目标相对当前增量 (GR00T N1.7 推荐)
+  - --action-mode relative_eef 末端执行器位姿增量 (仅 G1 操作任务)
 
 依赖:
   - unitree_rl_mjlab (pip install -e ../unitree_rl_mjlab)
-  - mujoco-warp
+  - mujoco-warp + torch
 
 数据流程:
-  mjlab 仿真 → episode_*.npz → convert_to_lerobot.py → LeRobot v2
+  mjlab 仿真 + (可选) PPO 策略 → episode_*.npz + episode_*.mp4
+                                       ↓
+                            convert_to_lerobot.py
+                                       ↓
+                          LeRobot v2 (parquet + mp4 + modality.json)
 
 使用方法:
-    # G1 机器人 (平坦地形)
-    python collect_data.py --task Unitree-G1-Flat \
-        --num-episodes 100 --instruction "walk forward"
+    # 1) Smoke test: 脚本化步态, 不开视频, 10 个 episode
+    python collect_data.py --agent scripted --num-episodes 10
 
-    # Go2 机器人 (粗糙地形)
-    python collect_data.py --task Unitree-Go2-Rough \
-        --num-episodes 100 --instruction "walk forward"
+    # 2) ⭐ 真实训练数据: 用 PPO 策略回放, 开启视频, 100 episode
+    python collect_data.py --agent trained \\
+        --checkpoint ../unitree_rl_mjlab/logs/rsl_rl/g1_velocity/<run>/model_*.pt \\
+        --task Unitree-G1-Flat --num-episodes 100 --video
+
+    # 3) 用 G1 粗糙地形 + 相对动作
+    python collect_data.py --agent trained --task Unitree-G1-Rough \\
+        --checkpoint <path> --action-mode delta --video
 """
 
 from __future__ import annotations
@@ -30,7 +49,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -39,6 +58,44 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 工具函数
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _asdict_safe(cfg: Any) -> dict[str, Any]:
+    """asdict 兼容版: 支持 frozen dataclass, 普通 class, 嵌套 dict 等。
+
+    mjlab 的 RslRlBaseRunnerCfg 是 frozen dataclass, 直接 asdict() 也行,
+    但部分版本有嵌套非 dataclass 字段, 这里用更宽松的实现。
+    """
+    try:
+        from dataclasses import asdict, is_dataclass
+        if is_dataclass(cfg):
+            return asdict(cfg)
+    except Exception:
+        pass
+    if hasattr(cfg, "__dict__"):
+        return dict(cfg.__dict__)
+    return {}
+
+
+def _to_numpy(t: Any) -> np.ndarray | None:
+    """torch.Tensor / numpy.ndarray → numpy (squeeze batch dim)."""
+    if t is None:
+        return None
+    if hasattr(t, "detach"):
+        t = t.detach()
+    if hasattr(t, "cpu"):
+        t = t.cpu()
+    if hasattr(t, "numpy"):
+        t = t.numpy()
+    arr = np.asarray(t)
+    if arr.ndim >= 2 and arr.shape[0] == 1:
+        arr = arr.squeeze(0)
+    return arr.astype(np.float32) if arr.dtype != np.float32 else arr
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -183,23 +240,47 @@ def collect_demonstrations(
     seed: int = 42,
     num_envs: int = 1,
     device: str = "auto",
+    # ─── 新增参数 ───
+    agent: str = "scripted",
+    checkpoint: str | None = None,
+    action_mode: str = "delta",
+    enable_video: bool = False,
+    video_height: int = 224,
+    video_width: int = 224,
+    camera_name: str | None = None,
+    instruction_pool: list[str] | None = None,
 ) -> str:
     """在 unitree_rl_mjlab 仿真环境中收集机器人演示数据。
 
     使用 unitree_rl_mjlab 的 ManagerBasedRlEnv 创建仿真环境，
-    配合步态生成器自动产生演示。数据格式兼容 GR00T fine-tune 管线。
+    配合 (脚本化 / 训练好的 / 随机的) 策略产生演示。
+    数据格式兼容 GR00T fine-tune 管线 (LeRobot v2)。
 
     Args:
         task_id: unitree_rl_mjlab 任务 ID (e.g. "Unitree-G1-Flat")
         num_episodes: 收集 episode 数量
         episode_length: 每个 episode 的时间步数
-        instruction: 语言指令
+        instruction: 默认语言指令 (每个 episode 从 instruction_pool 随机选)
         output_dir: 输出目录
-        show_viewer: 是否显示可视化
-        speed: 步态速度
+        show_viewer: 是否显示可视化 (需要 DISPLAY)
+        speed: 步态速度 (仅 scripted 模式)
         seed: 随机种子
-        num_envs: 仿真环境数量
+        num_envs: 仿真环境数量 (数据收集时强制为 1; 多环境会增加显存)
         device: 计算设备 ("auto", "cuda:0", "cpu")
+        agent: 策略类型
+            - "scripted": 正弦步态 (无需 checkpoint)
+            - "random": 随机关节目标 (无需 checkpoint)
+            - "zero": 零动作 (无需 checkpoint)
+            - "trained": 用 PPO checkpoint 回放 (必须指定 --checkpoint)
+        checkpoint: PPO checkpoint 路径 (.pt 文件), trained 模式必填
+        action_mode: 动作空间
+            - "absolute": 关节目标绝对位置 (mjlab JointPositionAction 直接吃)
+            - "delta": 关节目标相对当前位置的增量 (⭐ GR00T N1.7 推荐)
+            - "relative_eef": 末端位姿增量 (G1 操作任务)
+        enable_video: 是否采集 RGB 视频 (mjlab offscreen render)
+        video_height / video_width: 视频分辨率 (默认 224x224 匹配 GR00T)
+        camera_name: mjlab camera name (None = 用 unitree_rl_mjlab 默认 front_view)
+        instruction_pool: 备选指令列表 (每 episode 随机抽一个, 增加数据多样性)
 
     Returns:
         output_dir: 输出目录路径
@@ -253,134 +334,308 @@ def collect_demonstrations(
     logger.info("  Episodes: %d", num_episodes)
     logger.info("  Episode 长度: %d steps (%.1f s)", episode_length, episode_length * dt)
     logger.info("  指令: %s", instruction)
+    logger.info("  Agent: %s%s", agent,
+                 f" (checkpoint={checkpoint})" if checkpoint else "")
+    logger.info("  Action mode: %s", action_mode)
+    logger.info("  Video: %s (cam=%s, %dx%d @ %dfps)",
+                 enable_video, camera_name or "default",
+                 video_height, video_width, int(round(1.0 / dt)))
     logger.info("  设备: %s", device)
     logger.info("  输出: %s", output_dir)
     logger.info("=" * 60)
 
     # ── 4. 使用 unitree_rl_mjlab 创建仿真环境 ─────────────────────────
+    env_raw = None  # ManagerBasedRlEnv (有 observation_manager / render)
+    env_wrapped = None  # RslRlVecEnvWrapper (供 PPO policy 使用)
+    policy_fn: Callable | None = None  # trained 模式下: (obs) → action tensor
     use_mjlab = False
-    env = None
 
     try:
         # unitree_rl_mjlab 通过 mjlab.tasks.registry 加载任务
         # 需要先 import src.tasks 以触发任务注册
+        import torch as _torch  # noqa: F401 (确认 torch 可用)
         rl_mjlab_root = Path(__file__).resolve().parent.parent / "unitree_rl_mjlab"
         if rl_mjlab_root.exists() and str(rl_mjlab_root) not in sys.path:
             sys.path.insert(0, str(rl_mjlab_root))
 
-        from mjlab.tasks.registry import load_env_cfg, load_rl_cfg
+        from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
         from mjlab.envs import ManagerBasedRlEnv
-        from mjlab.rl import RslRlVecEnvWrapper
+        from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 
         # 触发任务注册 (import unitree_rl_mjlab 的 src 包)
         import src.tasks  # noqa: F401
 
-        # 加载任务配置
-        env_cfg = load_env_cfg(task_id, play=False)
+        # 加载任务配置 — 修正: 官方 API 是 play=True (用于 inference / 收集)
+        env_cfg = load_env_cfg(task_id, play=True)
+        # 数据收集强制单环境 (multi-env 会破坏 episode 边界)
+        env_cfg.scene.num_envs = 1
 
-        # 创建环境
-        env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
-        logger.info("✅ mjlab 环境创建成功 (device=%s)", device)
+        # 视频 / 渲染配置
+        if enable_video:
+            env_cfg.viewer.width = video_width
+            env_cfg.viewer.height = video_height
+            if camera_name is not None:
+                env_cfg.viewer.camera_name = camera_name
+
+        # ─── 创建原始 env (用于获取 per-key obs / state / 渲染) ───
+        render_mode = "rgb_array" if enable_video else None
+        env_raw = ManagerBasedRlEnv(
+            cfg=env_cfg, device=device, render_mode=render_mode
+        )
+        logger.info("✅ mjlab 环境创建成功 (device=%s, render=%s)",
+                    device, render_mode or "off")
         use_mjlab = True
+
+        # ─── 如果是 trained 模式, 加载 PPO 策略 ───
+        if agent == "trained":
+            if not checkpoint or not Path(checkpoint).exists():
+                raise FileNotFoundError(
+                    f"--agent trained 必须指定 --checkpoint, 且文件必须存在\n"
+                    f"  当前: {checkpoint}\n"
+                    f"  提示: 先跑 unitree_rl_mjlab/scripts/train.py 训一个 PPO 模型"
+                )
+
+            agent_cfg = load_rl_cfg(task_id)
+            # 包装成 VecEnv (policy 需要)
+            env_wrapped = RslRlVecEnvWrapper(env_raw, clip_actions=agent_cfg.clip_actions)
+
+            runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
+            runner = runner_cls(env_wrapped, _asdict_safe(agent_cfg), device=device)
+            runner.load(str(checkpoint), load_cfg={"actor": True}, strict=True,
+                        map_location=device)
+            policy_fn = runner.get_inference_policy(device=device)
+            logger.info("✅ PPO 策略加载成功: %s", Path(checkpoint).name)
 
     except ImportError as e:
         logger.warning("unitree_rl_mjlab 不可用: %s", e)
         logger.info("提示: cd /home/kxy/work/unitree/unitree_rl_mjlab && pip install -e .")
-        logger.info("回退到纯数据模式 (使用步态生成器 + 模拟物理)")
+        logger.info("回退到纯数据模式 (使用 %s 生成器 + 模拟物理)", agent)
+    except FileNotFoundError as e:
+        logger.error("❌ %s", e)
+        raise
     except Exception as e:
-        logger.warning("mjlab 环境创建失败: %s", e)
-        logger.info("回退到纯数据模式 (使用步态生成器 + 模拟物理)")
+        logger.warning("mjlab 环境创建/策略加载失败: %s", e)
+        import traceback
+        logger.debug("Traceback:\n%s", traceback.format_exc())
+        logger.info("回退到纯数据模式 (使用 %s 生成器 + 模拟物理)", agent)
 
     # ── 5. 收集数据 ───────────────────────────────────────────────────
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     rng = np.random.RandomState(seed)
 
+    # 准备可选的视频编码器 (懒加载, 缺 imageio 时优雅降级)
+    imageio = None
+    if enable_video:
+        try:
+            import imageio.v2 as imageio  # type: ignore
+            logger.info("✅ imageio 可用, 将保存 mp4 视频")
+        except ImportError:
+            try:
+                import imageio  # type: ignore
+                logger.info("✅ imageio (v1) 可用, 将保存 mp4 视频")
+            except ImportError:
+                logger.warning("⚠️ imageio 未安装, 视频将保存为 npz 帧序列 (后期 convert 时再编码)")
+                imageio = None
+
+    # 准备指令池
+    if instruction_pool:
+        logger.info("  指令池: %d 条", len(instruction_pool))
+    else:
+        instruction_pool = [instruction]
+
+    # 状态维度元数据 (用于 modality.json)
+    state_dim = num_joints * 2 + 3 + 4 + 3 + 3  # 71 / 37
+    if robot == "g1":
+        from configs.g1_config import G1_VIDEO_HEIGHT, G1_VIDEO_WIDTH, G1_VIDEO_KEY
+        video_height = video_height or G1_VIDEO_HEIGHT
+        video_width = video_width or G1_VIDEO_WIDTH
+        video_key = G1_VIDEO_KEY
+    else:
+        from configs.go2_config import GO2_VIDEO_HEIGHT, GO2_VIDEO_WIDTH, GO2_VIDEO_KEY
+        video_height = video_height or GO2_VIDEO_HEIGHT
+        video_width = video_width or GO2_VIDEO_WIDTH
+        video_key = GO2_VIDEO_KEY
+
     for ep in range(num_episodes):
         ep_speed = speed * rng.uniform(0.8, 1.2)
+        ep_instruction = instruction_pool[ep % len(instruction_pool)]
+        ep_rng = np.random.RandomState(seed + ep)
 
         # 重置环境
-        if use_mjlab and env is not None:
+        current_joint_pos = default_angles.copy()  # 用于 delta 动作的"上一时刻"
+        if use_mjlab and env_raw is not None:
             try:
-                reset_out = env.reset()
-                # ManagerBasedRlEnv.reset() 返回 ObservationVecDict
+                env_raw.reset()
+                # 同步当前 joint_pos (从 critic obs 拿, 比 actor 准)
+                obs_dict = _get_per_key_obs(env_raw)
+                if obs_dict.get("joint_pos_rel") is not None:
+                    current_joint_pos = _to_numpy(obs_dict["joint_pos_rel"]).copy()
+                elif obs_dict.get("joint_pos") is not None:
+                    current_joint_pos = _to_numpy(obs_dict["joint_pos"]).copy()
             except Exception as e:
                 logger.debug("reset 失败 (ep %d): %s", ep, e)
 
         observations = []
         actions = []
         rewards = []
+        frames = []  # 视频帧缓冲
 
         for step_idx in range(episode_length):
-            joint_targets = gait_fn(step_idx, dt=dt, speed=ep_speed, command=instruction)
-
-            # 尝试从 mjlab 环境获取真实观测
-            if use_mjlab and env is not None:
+            # ─── 1) 决定动作 ─────────────────────────────────────
+            if agent == "scripted":
+                joint_targets = gait_fn(step_idx, dt=dt, speed=ep_speed,
+                                        command=ep_instruction)
+            elif agent == "random":
+                # 随机目标在 default ± 0.3 范围内
+                joint_targets = (default_angles
+                                 + ep_rng.uniform(-0.3, 0.3, num_joints).astype(np.float32))
+            elif agent == "zero":
+                joint_targets = np.zeros(num_joints, dtype=np.float32)
+            elif agent == "trained" and policy_fn is not None:
+                # PPO 策略: 用 actor 观测 → 动作 (这是 raw action, mjlab 内部会 *scale)
                 try:
-                    # 将动作转换为 tensor (需要与环境 action 空间匹配)
-                    action_tensor = torch.from_numpy(
-                        joint_targets
-                    ).unsqueeze(0).to(device)
-
-                    # step 环境
-                    obs_out, reward, terminated, truncated, info = env.step(action_tensor)
-
-                    # 从观测中提取数据
-                    # obs_out 是 ObservationVecDict (dict[str, torch.Tensor])
-                    jp = obs_out.get("joint_pos_rel", obs_out.get("joint_pos", None))
-                    jv = obs_out.get("joint_vel_rel", obs_out.get("joint_vel", None))
-                    bp = obs_out.get("base_pos", None)
-                    bq = obs_out.get("base_quat", None)
-                    blv = obs_out.get("base_lin_vel", None)
-                    bav = obs_out.get("base_ang_vel", None)
-
-                    joint_pos = jp.squeeze(0).cpu().numpy() if jp is not None else None
-                    joint_vel = jv.squeeze(0).cpu().numpy() if jv is not None else None
-                    base_pos = bp.squeeze(0).cpu().numpy() if bp is not None else None
-                    base_quat = bq.squeeze(0).cpu().numpy() if bq is not None else None
-                    base_lin_vel = blv.squeeze(0).cpu().numpy() if blv is not None else None
-                    base_ang_vel = bav.squeeze(0).cpu().numpy() if bav is not None else None
-
-                    # 如果任一关键数据缺失，回退模拟
-                    if any(v is None for v in [joint_pos, base_pos]):
-                        raise ValueError("观测数据不完整")
-
+                    obs_vec = env_wrapped.unwrapped.observation_manager.compute()["actor"]
+                    obs_vec = obs_vec.float()
+                    with torch.no_grad():
+                        action_t = policy_fn(obs_vec)
+                    # action_t shape: (num_envs, action_dim) — 取第 0 个 env
+                    joint_targets = _to_numpy(action_t[0])
                 except Exception as e:
                     if step_idx == 0:
-                        logger.debug("mjlab step 失败, 回退模拟数据: %s", e)
-                    joint_pos, joint_vel, base_pos, base_quat, base_lin_vel, base_ang_vel = \
-                        _simulate_observation(joint_targets, default_angles, num_joints, dt, step_idx)
+                        logger.debug("trained 策略推理失败, 回退 scripted: %s", e)
+                    joint_targets = gait_fn(step_idx, dt=dt, speed=ep_speed,
+                                            command=ep_instruction)
             else:
-                joint_pos, joint_vel, base_pos, base_quat, base_lin_vel, base_ang_vel = \
-                    _simulate_observation(joint_targets, default_angles, num_joints, dt, step_idx)
+                joint_targets = gait_fn(step_idx, dt=dt, speed=ep_speed,
+                                        command=ep_instruction)
 
+            # ─── 2) 推 mjlab 环境 (有的话) ─────────────────────────
+            if use_mjlab and env_raw is not None:
+                try:
+                    import torch as _torch
+                    action_tensor = _torch.from_numpy(joint_targets).unsqueeze(0).to(device)
+                    obs_out, reward, terminated, truncated, info = env_raw.step(action_tensor)
+
+                    # 自动 reset (避免 episode 越界)
+                    if terminated or truncated:
+                        env_raw.reset()
+
+                    # 重新计算 per-key obs (mjlab step 后 obs_out 是拼接 tensor)
+                    obs_dict = _get_per_key_obs(env_raw)
+                except Exception as e:
+                    if step_idx == 0:
+                        logger.warning("mjlab step 失败, 回退模拟: %s", e)
+                    obs_dict = {}
+            else:
+                obs_dict = {}
+
+            # ─── 3) 提取 state ──────────────────────────────────────
+            joint_pos = _to_numpy(obs_dict.get("joint_pos_rel",
+                                obs_dict.get("joint_pos")))
+            joint_vel = _to_numpy(obs_dict.get("joint_vel_rel",
+                                obs_dict.get("joint_vel")))
+            base_pos = _to_numpy(obs_dict.get("base_pos"))
+            base_quat = _to_numpy(obs_dict.get("base_quat"))
+            base_lin_vel = _to_numpy(obs_dict.get("base_lin_vel"))
+            base_ang_vel = _to_numpy(obs_dict.get("base_ang_vel"))
+
+            # 缺数据时用模拟 fallback
+            if joint_pos is None or base_pos is None:
+                jp, jv, bp, bq, blv, bav = _simulate_observation(
+                    joint_targets, default_angles, num_joints, dt, step_idx)
+                joint_pos = joint_pos or jp
+                joint_vel = joint_vel or jv
+                base_pos = base_pos or bp
+                base_quat = base_quat or bq
+                base_lin_vel = base_lin_vel or blv
+                base_ang_vel = base_ang_vel or bav
+
+            # 维度修正: critic obs 里 joint_pos 是 relative(减 default), 我们要 absolute
+            # unitree_rl_mjlab 的 joint_pos_rel = (joint_pos - default)
+            # 这里反过来 add 回去
+            if obs_dict.get("joint_pos_rel") is not None and joint_pos is not None:
+                # mjlab 返回的是 rel, 还原为 abs
+                joint_pos = joint_pos + default_angles
+
+            # ─── 4) 构造动作 (按 action_mode) ───────────────────────
+            if action_mode == "absolute":
+                action_record = {
+                    "action.joint_position_target": joint_targets.astype(np.float32),
+                }
+            elif action_mode == "delta":
+                delta = (joint_targets - current_joint_pos).astype(np.float32)
+                action_record = {
+                    "action.joint_position_delta": delta,
+                    "action.joint_position_last": current_joint_pos.astype(np.float32),
+                }
+            elif action_mode == "relative_eef":
+                # TODO: 实际 EE 增量需要 IK; 这里 fallback 到 zero delta
+                # 后续可通过 mujoco forward kinematics 计算末端位姿
+                action_record = {
+                    "action.ee_pose_delta": np.zeros(7, dtype=np.float32),
+                }
+            else:
+                raise ValueError(f"未知 action_mode: {action_mode}")
+
+            # ─── 5) 渲染视频 ───────────────────────────────────────
+            if enable_video:
+                frame = _render_frame(env_raw, ep, step_idx)
+                if frame is not None:
+                    frames.append(frame)
+
+            # ─── 6) 记录 ───────────────────────────────────────────
             observations.append({
-                "state.joint_pos": joint_pos,
-                "state.joint_vel": joint_vel,
-                "state.base_pos": base_pos,
-                "state.base_quat": base_quat,
-                "state.base_lin_vel": base_lin_vel,
-                "state.base_ang_vel": base_ang_vel,
+                "state.joint_pos": joint_pos.astype(np.float32),
+                "state.joint_vel": joint_vel.astype(np.float32) if joint_vel is not None
+                                   else np.zeros(num_joints, dtype=np.float32),
+                "state.base_pos": base_pos.astype(np.float32),
+                "state.base_quat": base_quat.astype(np.float32) if base_quat is not None
+                                   else np.array([1, 0, 0, 0], dtype=np.float32),
+                "state.base_lin_vel": base_lin_vel.astype(np.float32) if base_lin_vel is not None
+                                      else np.zeros(3, dtype=np.float32),
+                "state.base_ang_vel": base_ang_vel.astype(np.float32) if base_ang_vel is not None
+                                      else np.zeros(3, dtype=np.float32),
             })
-            actions.append({"target_joint_pos": joint_targets})
+            actions.append(action_record)
             rewards.append(0.0)
 
-        # 保存 episode
+            # 更新"上一时刻"位姿 (用于下一步 delta)
+            current_joint_pos = joint_targets.astype(np.float32).copy()
+
+        # ─── 保存 episode (.npz) ──────────────────────────────────
         ep_path = output_path / f"episode_{ep:06d}.npz"
         np.savez_compressed(
             ep_path,
             observations=np.array(observations, dtype=object),
             actions=np.array(actions, dtype=object),
             rewards=np.array(rewards, dtype=np.float32),
+            instruction=ep_instruction,  # 每 episode 的指令 (供 LeRobot 标注)
         )
 
+        # ─── 保存视频 (.mp4 或 frames.npz) ──────────────────────
+        if enable_video and frames:
+            vid_path = output_path / f"episode_{ep:06d}.mp4"
+            if imageio is not None:
+                try:
+                    imageio.mimsave(str(vid_path), frames, fps=int(round(1.0 / dt)))
+                except Exception as e:
+                    logger.warning("mp4 编码失败, 改存 frames.npz: %s", e)
+                    np.savez_compressed(output_path / f"episode_{ep:06d}_frames.npz",
+                                        frames=np.stack(frames))
+            else:
+                np.savez_compressed(output_path / f"episode_{ep:06d}_frames.npz",
+                                    frames=np.stack(frames))
+
         if (ep + 1) % 10 == 0:
-            logger.info("收集进度: %d/%d episodes", ep + 1, num_episodes)
+            extra = f", {len(frames)} frames" if enable_video else ""
+            logger.info("收集进度: %d/%d episodes (ep_instruction='%s'%s)",
+                        ep + 1, num_episodes, ep_instruction[:30], extra)
 
     # ── 6. 关闭环境 ───────────────────────────────────────────────────
-    if env is not None:
+    if env_raw is not None:
         try:
-            env.close()
+            env_raw.close()
         except Exception:
             pass
 
@@ -391,10 +646,20 @@ def collect_demonstrations(
         "num_episodes": num_episodes,
         "episode_length": episode_length,
         "instruction": instruction,
-        "state_dim": 37,
-        "action_dim": num_joints,
-        "control_mode": "joint_absolute",
-        "simulator": "unitree_rl_mjlab (mjlab)",
+        "instruction_pool": instruction_pool,
+        "agent": agent,
+        "checkpoint": checkpoint,
+        "action_mode": action_mode,
+        "enable_video": enable_video,
+        "video_fps": int(round(1.0 / dt)) if enable_video else 0,
+        "video_height": video_height if enable_video else 0,
+        "video_width": video_width if enable_video else 0,
+        "video_key": video_key if enable_video else None,
+        "num_joints": num_joints,
+        "state_dim": state_dim,
+        "action_dim": num_joints if action_mode != "relative_eef" else 7,
+        "control_mode": "joint_" + action_mode,
+        "simulator": "unitree_rl_mjlab (mjlab)" if use_mjlab else "mock",
         "dt": dt,
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
@@ -414,6 +679,116 @@ def collect_demonstrations(
 # ──────────────────────────────────────────────────────────────────────────────
 # 辅助函数
 # ──────────────────────────────────────────────────────────────────────────────
+
+
+def _get_per_key_obs(env_raw: Any) -> dict[str, Any]:
+    """从 unitree_rl_mjlab ManagerBasedRlEnv 取 per-key 观测 (dict[str, tensor]).
+
+    mjlab env.step() 返回的 obs 是按 actor/critic 拼接的 tensor,
+    这里通过 observation_manager.compute() 拿分组前的 dict。
+    """
+    out: dict[str, Any] = {}
+    try:
+        om = env_raw.unwrapped.observation_manager
+        # compute() 返回 {"actor": tensor, "critic": tensor}; 我们要 per-key
+        groups = om.compute()
+        # 尝试拿到 ObservationManager 的 terms (mjlab 内部结构)
+        # 旧 mjlab: om._terms (dict[group_name → dict[term_name → term]])
+        # 新 mjlab: om.terms
+        for getter_name in ("terms", "_terms"):
+            terms = getattr(om, getter_name, None)
+            if not terms:
+                continue
+            for group_name, group_terms in terms.items():
+                if not isinstance(group_terms, dict):
+                    continue
+                for term_name, term in group_terms.items():
+                    # term.data 是当前帧的 tensor
+                    data = getattr(term, "data", None)
+                    if data is None:
+                        continue
+                    if hasattr(data, "squeeze"):
+                        out[term_name] = data
+            break
+        # 如果拿到 groups 但 terms 不在 manager 上, 直接尝试 compute_group
+        if not out and hasattr(om, "compute_group"):
+            for group_name in ("actor", "critic"):
+                try:
+                    g = om.compute_group(group_name)  # (num_envs, group_dim)
+                    out[group_name] = g
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.debug("observation_manager.compute 失败: %s", e)
+
+    # 兜底: 拿 robot entity 的 raw state (mjlab Entity.data)
+    try:
+        robot = env_raw.unwrapped.scene["robot"]
+        rd = robot.data
+        # 常用字段 (参考 mjlab EntityData)
+        if "base_pos" not in out and getattr(rd, "root_link_pos_w", None) is not None:
+            out["base_pos"] = rd.root_link_pos_w          # (num_envs, 3)
+        if "base_quat" not in out and getattr(rd, "root_link_quat_w", None) is not None:
+            out["base_quat"] = rd.root_link_quat_w        # (num_envs, 4)
+        if "base_lin_vel" not in out and getattr(rd, "root_link_lin_vel_w", None) is not None:
+            out["base_lin_vel"] = rd.root_link_lin_vel_w
+        if "base_ang_vel" not in out and getattr(rd, "root_link_ang_vel_w", None) is not None:
+            out["base_ang_vel"] = rd.root_link_ang_vel_w
+        if "joint_pos" not in out and getattr(rd, "joint_pos", None) is not None:
+            out["joint_pos"] = rd.joint_pos               # 关节绝对位置 (rad)
+        if "joint_vel" not in out and getattr(rd, "joint_vel", None) is not None:
+            out["joint_vel"] = rd.joint_vel
+    except Exception as e:
+        logger.debug("Entity.data 兜底失败: %s", e)
+
+    return out
+
+
+def _render_frame(env_raw: Any, ep: int, step: int) -> np.ndarray | None:
+    """从 mjlab env 渲染一帧 RGB 图像 (H, W, 3) uint8.
+
+    尝试多种 API (兼容性):
+      1) env.render() → gym-style
+      2) env.unwrapped.sim.render(...) → mujoco offscreen
+      3) 直接 mjlab 的 viewer.render()
+    """
+    if env_raw is None:
+        return None
+    # 方案 1: gym-style render
+    try:
+        frame = env_raw.render()
+        if frame is not None:
+            arr = np.asarray(frame)
+            if arr.dtype != np.uint8:
+                arr = (arr * 255).clip(0, 255).astype(np.uint8) if arr.max() <= 1.0 \
+                    else arr.clip(0, 255).astype(np.uint8)
+            return arr
+    except Exception:
+        pass
+    # 方案 2: mjlab sim.render (offscreen)
+    try:
+        sim = env_raw.unwrapped.sim
+        # mjlab 的 sim 实际是 mujoco Warp 后端, 通过 sim._model / sim._data 拿 mujoco native
+        native = getattr(sim, "_model", None), getattr(sim, "_data", None)
+        if native[0] is not None and native[1] is not None:
+            import mujoco  # noqa
+            renderer = getattr(env_raw.unwrapped, "_renderer", None)
+            if renderer is None:
+                # 懒加载
+                from mujoco import Renderer
+                viewer_cfg = env_raw.unwrapped.cfg.viewer
+                renderer = Renderer(
+                    height=int(getattr(viewer_cfg, "height", 224)),
+                    width=int(getattr(viewer_cfg, "width", 224)),
+                )
+            renderer.update_scene(native[1], camera=getattr(env_raw.unwrapped.cfg.viewer,
+                                                           "camera_name", -1))
+            frame = renderer.render()
+            return np.asarray(frame).astype(np.uint8)
+    except Exception as e:
+        if step == 0:
+            logger.debug("sim.render 失败: %s", e)
+    return None
 
 
 def _simulate_observation(
@@ -449,7 +824,27 @@ def _simulate_observation(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="数据收集器 — 基于 unitree_rl_mjlab 仿真收集 G1/Go2 演示数据"
+        description="数据收集器 — 基于 unitree_rl_mjlab 仿真收集 G1/Go2 演示数据 (兼容 GR00T fine-tune)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 1) Smoke test: 脚本化步态, 不开视频
+  python collect_data.py --agent scripted --num-episodes 10
+
+  # 2) ⭐ 真实训练数据: 用训练好的 PPO 策略 + 视频
+  python collect_data.py --agent trained \\
+      --checkpoint ../unitree_rl_mjlab/logs/rsl_rl/g1_velocity/<run>/model_<iter>.pt \\
+      --task Unitree-G1-Flat --num-episodes 100 --video
+
+  # 3) 绝对关节目标 (mjlab 直接喂)
+  python collect_data.py --agent trained --action-mode absolute --video
+
+  # 4) Go2 四足 + 随机策略 + 视频
+  python collect_data.py --task Unitree-Go2-Flat --agent random --video --num-episodes 50
+
+  # 5) 多样化指令 (locomotion skills)
+  python collect_data.py --agent trained --instruction-pool "walk forward,turn left,stop,walk backward"
+        """,
     )
     parser.add_argument(
         "--task", type=str, default="Unitree-G1-Flat",
@@ -461,33 +856,67 @@ def main():
     parser.add_argument("--episode-length", type=int, default=200,
                         help="每个 episode 的时间步数 (default: 200)")
     parser.add_argument("--instruction", type=str, default="walk forward",
-                        help="语言指令 (default: 'walk forward')")
+                        help="默认语言指令 (default: 'walk forward')")
+    parser.add_argument("--instruction-pool", type=str, default=None,
+                        help="备选指令列表 (逗号分隔), 每 episode 随机抽一个")
     parser.add_argument("--output-dir", type=str, default=None,
-                        help="输出目录 (default: /workspace/data/raw)")
+                        help="输出目录 (default: /workspace/data/{robot}_raw)")
     parser.add_argument("--speed", type=float, default=0.5,
-                        help="步态速度 (default: 0.5)")
+                        help="步态速度, 仅 --agent scripted 生效 (default: 0.5)")
     parser.add_argument("--seed", type=int, default=42,
                         help="随机种子 (default: 42)")
     parser.add_argument("--device", type=str, default="auto",
-                        help="计算设备 (default: auto)")
+                        help="计算设备: auto | cuda:0 | cpu (default: auto)")
     parser.add_argument("--show-viewer", action="store_true",
-                        help="显示 mjlab 可视化")
+                        help="显示 mjlab 可视化窗口 (需要 DISPLAY)")
+    # ─── 新增选项 ───
+    parser.add_argument("--agent", type=str, default="scripted",
+                        choices=["scripted", "random", "zero", "trained"],
+                        help="策略类型 (default: scripted)")
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="PPO checkpoint 路径 (.pt), --agent trained 必填")
+    parser.add_argument("--action-mode", type=str, default="delta",
+                        choices=["absolute", "delta", "relative_eef"],
+                        help="动作空间 (default: delta, ⭐ GR00T N1.7 推荐)")
+    parser.add_argument("--video", action="store_true",
+                        help="采集 RGB 视频 (mjlab offscreen render, 每 episode 一个 mp4)")
+    parser.add_argument("--video-height", type=int, default=224,
+                        help="视频高度 (default: 224, GR00T 推荐)")
+    parser.add_argument("--video-width", type=int, default=224,
+                        help="视频宽度 (default: 224)")
+    parser.add_argument("--camera-name", type=str, default=None,
+                        help="mjlab camera name (None=默认 front_view)")
     args = parser.parse_args()
 
     if args.output_dir is None:
         robot = TASK_TO_ROBOT.get(args.task, "g1")
         args.output_dir = f"/workspace/data/{robot}_raw"
 
+    # 解析 instruction_pool
+    instruction_pool = None
+    if args.instruction_pool:
+        instruction_pool = [s.strip() for s in args.instruction_pool.split(",") if s.strip()]
+        if not instruction_pool:
+            instruction_pool = None
+
     collect_demonstrations(
         task_id=args.task,
         num_episodes=args.num_episodes,
         episode_length=args.episode_length,
         instruction=args.instruction,
+        instruction_pool=instruction_pool,
         output_dir=args.output_dir,
         show_viewer=args.show_viewer,
         speed=args.speed,
         seed=args.seed,
         device=args.device,
+        agent=args.agent,
+        checkpoint=args.checkpoint,
+        action_mode=args.action_mode,
+        enable_video=args.video,
+        video_height=args.video_height,
+        video_width=args.video_width,
+        camera_name=args.camera_name,
     )
 
 

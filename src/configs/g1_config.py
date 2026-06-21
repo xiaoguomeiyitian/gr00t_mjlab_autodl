@@ -36,8 +36,16 @@ G1_JOINT_NAMES = [
 ]
 
 # GR00T 模态维度
-G1_STATE_DIM = 37   # 12 joint_pos + 12 joint_vel + 3 base_pos + 4 base_quat + 3 lin_vel + 3 ang_vel
-G1_ACTION_DIM = 29  # 全部 29 关节
+# 真实维度: joint_pos(29) + joint_vel(29) + base_pos(3) + base_quat(4) + lin_vel(3) + ang_vel(3) = 71
+G1_STATE_DIM = G1_NUM_JOINTS * 2 + 3 + 4 + 3 + 3  # = 71
+G1_ACTION_DIM = G1_NUM_JOINTS  # = 29
+
+# ── 动作空间选项 ──────────────────────────────────────────────────────────
+# - "absolute": 关节目标绝对位置 (rad), 直接可喂 mjlab JointPositionActionCfg
+# - "delta":    关节目标相对当前位置的增量 (rad), GR00T N1.7 推荐
+# - "relative_eef": 末端执行器位姿增量 (GR00T 默认), 适用于操作任务
+G1_ACTION_MODES = ("absolute", "delta", "relative_eef")
+G1_DEFAULT_ACTION_MODE = "delta"
 
 # ── 默认站立姿态 (HOME_KEYFRAME from unitree_rl_mjlab) ─────────────────────
 # source: src/assets/robots/unitree_g1/g1_constants.py
@@ -87,11 +95,59 @@ G1_DT = 0.02  # 50 Hz (mjlab 默认)
 G1_EMBODIMENT_TAG = "NEW_EMBODIMENT"
 G1_EMBODIMENT_ID = 29
 
+# ── 渲染 / 视频参数 ──────────────────────────────────────────────────────
+G1_VIDEO_HEIGHT = 224
+G1_VIDEO_WIDTH = 224
+G1_VIDEO_FPS = 50  # mjlab 默认 50Hz, 与 G1_DT 匹配
+G1_VIDEO_KEY = "video.front_view"
+# mjlab 默认 camera name (位于 pelvis / torso 上方)
+G1_DEFAULT_CAMERA_NAME = "front_view"
+
 
 # ── LeRobot v2 modality.json ────────────────────────────────────────────────
 
-def get_g1_modality_config() -> dict[str, Any]:
-    """返回 G1 的 LeRobot v2 modality.json 内容。"""
+def get_g1_modality_config(action_mode: str = "delta") -> dict[str, Any]:
+    """返回 G1 的 LeRobot v2 modality.json 内容。
+
+    Args:
+        action_mode: "absolute" | "delta" | "relative_eef"
+            - absolute:     action.joint_position_target  (29,)
+            - delta:        action.joint_position_delta   (29,)  ← GR00T N1.7 推荐
+            - relative_eef: action.ee_pose_delta         (7,)   ← 末端位姿增量
+    """
+    if action_mode == "absolute":
+        action_block = {
+            "action.joint_position_target": {
+                "dtype": "float32",
+                "shape": [G1_NUM_JOINTS],
+                "description": "G1 29 关节目标位置 (rad, 绝对量)",
+            },
+        }
+    elif action_mode == "delta":
+        action_block = {
+            "action.joint_position_delta": {
+                "dtype": "float32",
+                "shape": [G1_NUM_JOINTS],
+                "description": "G1 29 关节目标位置增量 (rad, 相对当前)",
+            },
+            # 同时记录上一时刻绝对位置 (用于推理时累加回绝对量)
+            "action.joint_position_last": {
+                "dtype": "float32",
+                "shape": [G1_NUM_JOINTS],
+                "description": "G1 29 关节上一时刻位置 (rad, 用于 delta 累加)",
+            },
+        }
+    elif action_mode == "relative_eef":
+        action_block = {
+            "action.ee_pose_delta": {
+                "dtype": "float32",
+                "shape": [7],
+                "description": "末端位姿增量 (pos:3 + quat:4)",
+            },
+        }
+    else:
+        raise ValueError(f"未知 action_mode: {action_mode}")
+
     return {
         "state": {
             "state.joint_pos": {
@@ -107,37 +163,31 @@ def get_g1_modality_config() -> dict[str, Any]:
             "state.base_pos": {
                 "dtype": "float32",
                 "shape": [3],
-                "description": "基座位置 (m)",
+                "description": "基座位置 (m, world frame)",
             },
             "state.base_quat": {
                 "dtype": "float32",
                 "shape": [4],
-                "description": "基座四元数 (wxyz)",
+                "description": "基座四元数 (wxyz, world frame)",
             },
             "state.base_lin_vel": {
                 "dtype": "float32",
                 "shape": [3],
-                "description": "基座线速度 (m/s)",
+                "description": "基座线速度 (m/s, world frame)",
             },
             "state.base_ang_vel": {
                 "dtype": "float32",
                 "shape": [3],
-                "description": "基座角速度 (rad/s)",
+                "description": "基座角速度 (rad/s, world frame)",
             },
         },
-        "action": {
-            "action.joint_position_target": {
-                "dtype": "float32",
-                "shape": [G1_ACTION_DIM],
-                "description": "G1 29 关节目标位置 (rad)",
-            },
-        },
+        "action": action_block,
         "video": {
-            "video.front_view": {
+            G1_VIDEO_KEY: {
                 "dtype": "video",
-                "shape": [224, 224, 3],
-                "fps": 50,
-                "description": "前方 RGB 相机 (224x224)",
+                "shape": [G1_VIDEO_HEIGHT, G1_VIDEO_WIDTH, 3],
+                "fps": G1_VIDEO_FPS,
+                "description": f"前方 RGB 相机 ({G1_VIDEO_HEIGHT}x{G1_VIDEO_WIDTH} @ {G1_VIDEO_FPS}fps)",
             },
         },
     }

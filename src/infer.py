@@ -195,8 +195,13 @@ class GR00TLocalInference:
             import src.tasks  # noqa: F401
 
             env_cfg = load_env_cfg(self.task_id, play=True)
-            env = ManagerBasedRlEnv(cfg=env_cfg, device=self.device)
-            logger.info("✅ unitree_rl_mjlab 环境创建成功")
+            # 推理用单环境
+            env_cfg.scene.num_envs = 1
+            # 默认 224x224 视频尺寸 (匹配 GR00T)
+            env_cfg.viewer.width = 224
+            env_cfg.viewer.height = 224
+            env = ManagerBasedRlEnv(cfg=env_cfg, device=self.device, render_mode="rgb_array")
+            logger.info("✅ unitree_rl_mjlab 环境创建成功 (rgb_array)")
         except ImportError as e:
             logger.warning("依赖未安装: %s", e)
             logger.info("回退到纯推理模式 (无物理仿真)")
@@ -207,17 +212,20 @@ class GR00TLocalInference:
             env = None
 
         # ── 推理循环 ─────────────────────────────────────────────────
+        # 懒加载共享渲染 + obs 工具
+        from mjlab_env import get_per_key_obs, render_frame  # type: ignore
+
         for step in range(max_steps):
             # 获取观测
             if env is not None:
                 try:
-                    obs_raw = env.unwrapped.reset() if step == 0 else None
-                    if obs_raw is not None:
-                        env_obs = obs_raw
-                    else:
-                        env_obs = env.unwrapped.observation_manager.compute() \
-                            if hasattr(env.unwrapped, "observation_manager") else None
-                    obs = self._env_obs_to_dict(env_obs, step)
+                    if step == 0:
+                        env.reset()
+                    obs = self._env_obs_to_dict(env, step)
+                    # ⭐ 真实渲染: 从 mjlab env 拿一帧 RGB
+                    frame = render_frame(env, height=224, width=224)
+                    if frame is not None:
+                        obs["video.front_view"] = frame
                 except Exception as e:
                     if step == 0:
                         logger.debug("mjlab obs 获取失败: %s", e)
@@ -256,53 +264,66 @@ class GR00TLocalInference:
 
         logger.info("✅ 推理完成! 共 %d 步", max_steps)
 
-    def _env_obs_to_dict(self, env_obs: Any, step: int) -> dict[str, Any]:
-        """从 unitree_rl_mjlab 的观测中提取 GR00T 格式数据。"""
-        # 默认 fallback
+    def _env_obs_to_dict(self, env_or_obs: Any, step: int) -> dict[str, Any]:
+        """从 unitree_rl_mjlab env/obs 提取 GR00T 格式数据.
+
+        输入可以是:
+          - ManagerBasedRlEnv 实例 → 通过 get_per_key_obs() 拆 term
+          - dict / TensorDict → 已有 per-key 观测
+          - None → fallback mock
+        """
         mock = self._mock_observation(step)
-        if env_obs is None:
+        if env_or_obs is None:
             return mock
 
-        try:
-            # env_obs 可能是 dict 或 TensorDict
-            if hasattr(env_obs, "get"):
-                obs_dict = env_obs
-            elif isinstance(env_obs, dict):
-                obs_dict = env_obs
-            else:
-                return mock
+        # 1) 是 env 实例: 用共享工具拆 per-key obs
+        is_env = hasattr(env_or_obs, "unwrapped") and hasattr(
+            env_or_obs.unwrapped, "observation_manager")
+        if is_env:
+            try:
+                from mjlab_env import get_per_key_obs, to_numpy  # type: ignore
+                raw = get_per_key_obs(env_or_obs)
+            except Exception as e:
+                logger.debug("get_per_key_obs 失败: %s", e)
+                raw = {}
+        # 2) 已是 per-key dict
+        elif isinstance(env_or_obs, dict) or hasattr(env_or_obs, "get"):
+            raw = dict(env_or_obs) if isinstance(env_or_obs, dict) else env_or_obs
+        else:
+            raw = {}
 
-            # 提取关节位置/速度
-            jp = obs_dict.get("joint_pos_rel", obs_dict.get("joint_pos"))
-            jv = obs_dict.get("joint_vel_rel", obs_dict.get("joint_vel"))
-            bp = obs_dict.get("base_pos")
-            bq = obs_dict.get("base_quat")
-            blv = obs_dict.get("base_lin_vel")
-            bav = obs_dict.get("base_ang_vel")
+        def _np(x):
+            if x is None:
+                return None
+            if hasattr(x, "detach"):
+                x = x.detach()
+            if hasattr(x, "cpu"):
+                x = x.cpu()
+            arr = x.numpy() if hasattr(x, "numpy") else np.asarray(x)
+            if arr.ndim >= 2 and arr.shape[0] == 1:
+                arr = arr.squeeze(0)
+            return arr.astype(np.float32)
 
-            def _to_numpy(x):
-                """tensor → numpy (支持 batch 维度 squeeze)."""
-                if x is None:
-                    return None
-                if hasattr(x, "cpu"):
-                    return x.squeeze(0).cpu().numpy()
-                return np.asarray(x)
+        # joint_pos (相对或绝对)
+        jp = raw.get("joint_pos_rel", raw.get("joint_pos"))
+        jv = raw.get("joint_vel_rel", raw.get("joint_vel"))
+        bp = raw.get("base_pos") or raw.get("root_link_pos_w")
+        bq = raw.get("base_quat") or raw.get("root_link_quat_w")
+        blv = raw.get("base_lin_vel") or raw.get("root_link_lin_vel_w")
+        bav = raw.get("base_ang_vel") or raw.get("root_link_ang_vel_w")
 
-            if jp is not None:
-                mock["state.joint_pos"] = _to_numpy(jp)
-            if jv is not None:
-                mock["state.joint_vel"] = _to_numpy(jv)
-            if bp is not None:
-                mock["state.base_pos"] = _to_numpy(bp)
-            if bq is not None:
-                mock["state.base_quat"] = _to_numpy(bq)
-            if blv is not None:
-                mock["state.base_lin_vel"] = _to_numpy(blv)
-            if bav is not None:
-                mock["state.base_ang_vel"] = _to_numpy(bav)
-
-        except Exception as e:
-            logger.debug("obs 转换失败: %s", e)
+        if jp is not None:
+            mock["state.joint_pos"] = _np(jp)
+        if jv is not None:
+            mock["state.joint_vel"] = _np(jv)
+        if bp is not None:
+            mock["state.base_pos"] = _np(bp)
+        if bq is not None:
+            mock["state.base_quat"] = _np(bq)
+        if blv is not None:
+            mock["state.base_lin_vel"] = _np(blv)
+        if bav is not None:
+            mock["state.base_ang_vel"] = _np(bav)
 
         return mock
 

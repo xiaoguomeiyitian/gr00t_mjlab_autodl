@@ -459,6 +459,70 @@ python3 collect_data.py --task Unitree-Go2-Rough \
 
 ---
 
+## 📹 数据采集选项 (collect_data.py)
+
+`collect_data.py` 已支持 4 种**专家 Agent** 与 3 种**动作空间**,可任意组合用于收集 GR00T fine-tune 数据。
+
+### 4 种 Agent
+
+| Agent | 说明 | 用途 | 备注 |
+|-------|------|------|------|
+| `scripted` | 脚本化正弦步态 (默认) | CI / 流程测试 | 真实数据收集中**不推荐**(不是 PPO 专家) |
+| `trained` ⭐ | 加载训练好的 PPO checkpoint | **真实演示** | 需先 `cd ../unitree_rl_mjlab && python scripts/train.py --task Unitree-G1-Flat` 训练出 `model_*.pt` |
+| `random` | 随机动作 | 探索 / baseline 对比 | — |
+| `zero` | 零动作 | sanity check | — |
+
+> ⭐ **真实可用链路**: 必须用 `--agent trained` + `--checkpoint model.pt`,否则数据是脚本化振荡,GR00T 学不到有用模式。
+
+### 3 种动作空间 (`--action-mode`)
+
+| 模式 | 适用机器人 | 数据字段 | 推荐场景 |
+|------|------------|----------|----------|
+| `absolute` (默认) | G1 / Go2 | `action.joint_position_target` | 关节目标位置绝对值 |
+| `delta` ⭐ | G1 / Go2 | `action.joint_position_delta` + `action.joint_position_last` | **locomotion 推荐**(对累积漂移更鲁棒) |
+| `relative_eef` | G1 (有手) | `action.ee_pose_delta` | 末端执行器相对位姿 (manipulation) |
+
+### 视频采集 (`--video`)
+
+GR00T N1.7 是 **VLA** (Vision-Language-Action),**必须包含 RGB 视频**作为视觉输入。本项目支持两种产出:
+
+- **imageio mp4 输出** (优先): 224×224 RGB @ 30 fps,直接写入 `episode_NNNNNN.mp4`
+- **frames npz fallback**: 当 imageio 不可用时,降级为 `episode_NNNNNN_frames.npz` 存储原始帧序列,转换阶段自动重新编码
+
+### 使用示例
+
+```bash
+# ⭐ 真实链路: PPO 专家 + delta 动作 + 视频 + 100 episodes
+./scripts/01_local_collect.sh \
+    --robot g1 \
+    --task Unitree-G1-Flat \
+    --agent trained \
+    --checkpoint ../unitree_rl_mjlab/logs/rsl_rl/Unitree-G1-Flat/2025-XX-XX/model_3000.pt \
+    --action-mode delta \
+    --video \
+    --episodes 200 \
+    --instruction "walk forward at 0.5 m/s"
+
+# CI smoke test: 脚本化 + 无视频 (仅验证流程)
+./scripts/01_local_collect.sh \
+    --robot g1 \
+    --agent scripted \
+    --no-video \
+    --episodes 5
+
+# 末端执行器相对位姿 (manipulation)
+./scripts/01_local_collect.sh \
+    --robot g1 \
+    --agent trained \
+    --checkpoint /path/to/ppo.pt \
+    --action-mode relative_eef \
+    --instruction "pick up the red block"
+```
+
+> ⚠️ **重要**: 训练时(`03_autodl_train.sh`)的 `action_mode` 必须与采集时一致。脚本会自动从 `meta/modality.json` 读取并在日志中显示,不匹配时会发出警告。
+
+---
+
 ## 📊 数据格式 (LeRobot v2)
 
 转换后的数据目录结构:

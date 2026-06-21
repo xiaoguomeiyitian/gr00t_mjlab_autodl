@@ -36,6 +36,13 @@ EPISODE_LENGTH=200
 INSTRUCTION="walk forward"
 SPEED=0.5
 SEED=42
+AGENT_TYPE="scripted"       # scripted | random | zero | trained
+ACTION_MODE="absolute"      # absolute | delta | relative_eef (relative_eef 仅 G1)
+ENABLE_VIDEO=true           # 采集 RGB 视频 (GR00T 必需)
+VIDEO_HEIGHT=224
+VIDEO_WIDTH=224
+VIDEO_FPS=30
+CHECKPOINT=""               # --agent trained 时必填
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -46,9 +53,39 @@ while [[ $# -gt 0 ]]; do
         --instruction)  INSTRUCTION="$2";    shift 2 ;;
         --speed)        SPEED="$2";          shift 2 ;;
         --seed)         SEED="$2";           shift 2 ;;
+        --agent)        AGENT_TYPE="$2";     shift 2 ;;
+        --action-mode)  ACTION_MODE="$2";    shift 2 ;;
+        --video)        ENABLE_VIDEO=true;   shift   ;;
+        --no-video)     ENABLE_VIDEO=false;  shift   ;;
+        --video-height) VIDEO_HEIGHT="$2";   shift 2 ;;
+        --video-width)  VIDEO_WIDTH="$2";    shift 2 ;;
+        --video-fps)    VIDEO_FPS="$2";      shift 2 ;;
+        --checkpoint)   CHECKPOINT="$2";     shift 2 ;;
         -h|--help)
-            echo "用法: $0 [--robot g1|go2] [--task TASK_ID] [--episodes N]"
-            echo "      [--length N] [--instruction 'text'] [--speed F] [--seed N]"
+            echo "用法: $0 [选项]"
+            echo ""
+            echo "基础:"
+            echo "  --robot g1|go2          (默认 g1)"
+            echo "  --task TASK_ID          (默认 Unitree-{Robot}-Flat)"
+            echo "  --episodes N            (默认 100)"
+            echo "  --length N              每 episode 步数 (默认 200)"
+            echo "  --instruction TEXT      语言指令 (默认 'walk forward')"
+            echo "  --speed F               步态速度 (默认 0.5)"
+            echo "  --seed N                随机种子 (默认 42)"
+            echo ""
+            echo "Agent:"
+            echo "  --agent TYPE            scripted|random|zero|trained (默认 scripted)"
+            echo "  --checkpoint PATH       trained agent PPO checkpoint (.pt)"
+            echo ""
+            echo "动作空间 (GR00T fine-tune 用):"
+            echo "  --action-mode MODE      absolute|delta|relative_eef (默认 absolute)"
+            echo "  注: relative_eef 仅 G1 (需 6D EEF), delta 推荐用于 locomotion"
+            echo ""
+            echo "视频:"
+            echo "  --video / --no-video    启用/禁用 mp4 输出 (默认 video)"
+            echo "  --video-height H        默认 224 (GR00T 期望)"
+            echo "  --video-width W         默认 224"
+            echo "  --video-fps N           默认 30"
             exit 0
             ;;
         *) fail "未知参数: $1" ;;
@@ -76,7 +113,19 @@ info "Episodes:   $NUM_EPISODES"
 info "Episode 长度: $EPISODE_LENGTH steps"
 info "语言指令:   $INSTRUCTION"
 info "步态速度:   $SPEED"
+info "Agent:      $AGENT_TYPE$([[ "$AGENT_TYPE" == "trained" && -n "$CHECKPOINT" ]] && echo " ($CHECKPOINT)")"
+info "动作空间:   $ACTION_MODE"
+info "视频:       $([ "$ENABLE_VIDEO" = true ] && echo "✅ ${VIDEO_WIDTH}x${VIDEO_HEIGHT}@${VIDEO_FPS}fps" || echo "❌")"
 echo ""
+
+# 校验 action-mode 与 robot 兼容
+if [[ "$ACTION_MODE" == "relative_eef" && "$ROBOT" == "go2" ]]; then
+    warn "relative_eef 模式仅适用于有末端执行器的 G1, 回退到 delta"
+    ACTION_MODE="delta"
+fi
+if [[ "$ACTION_MODE" == "trained" && -z "$CHECKPOINT" ]]; then
+    fail "--agent trained 必须配合 --checkpoint PATH"
+fi
 
 # ── 检查 unitree_rl_mjlab ──────────────────────────────────────────────────
 step "检查 unitree_rl_mjlab 安装..."
@@ -94,14 +143,31 @@ info "unitree_rl_mjlab: OK"
 # Step 1: 收集数据
 # ════════════════════════════════════════════════════════════════════════════
 step "Step 1/3: 在 unitree_rl_mjlab 仿真中收集演示数据..."
-python3 "$SRC_DIR/collect_data.py" \
-    --task "$TASK" \
-    --num-episodes "$NUM_EPISODES" \
-    --episode-length "$EPISODE_LENGTH" \
-    --instruction "$INSTRUCTION" \
-    --output-dir "$RAW_DIR" \
-    --speed "$SPEED" \
+
+COLLECT_ARGS=(
+    --task "$TASK"
+    --num-episodes "$NUM_EPISODES"
+    --episode-length "$EPISODE_LENGTH"
+    --instruction "$INSTRUCTION"
+    --output-dir "$RAW_DIR"
+    --speed "$SPEED"
     --seed "$SEED"
+    --agent "$AGENT_TYPE"
+    --action-mode "$ACTION_MODE"
+)
+if [ "$ENABLE_VIDEO" = true ]; then
+    COLLECT_ARGS+=(
+        --video
+        --video-height "$VIDEO_HEIGHT"
+        --video-width "$VIDEO_WIDTH"
+        --video-fps "$VIDEO_FPS"
+    )
+fi
+if [ -n "$CHECKPOINT" ]; then
+    COLLECT_ARGS+=(--checkpoint "$CHECKPOINT")
+fi
+
+python3 "$SRC_DIR/collect_data.py" "${COLLECT_ARGS[@]}"
 
 if [ ! -d "$RAW_DIR" ]; then
     fail "数据收集失败: $RAW_DIR 不存在"
@@ -113,10 +179,16 @@ info "已收集 $EPISODE_COUNT 个 episodes"
 # Step 2: 转换为 LeRobot v2 格式
 # ════════════════════════════════════════════════════════════════════════════
 step "Step 2/3: 转换为 LeRobot v2 格式..."
-python3 "$SRC_DIR/convert_to_lerobot.py" \
-    --robot "$ROBOT" \
-    --data-dir "$RAW_DIR" \
+CONVERT_ARGS=(
+    --robot "$ROBOT"
+    --data-dir "$RAW_DIR"
     --output-dir "$LEROBOT_DIR"
+    --action-mode "$ACTION_MODE"
+)
+if [ "$ENABLE_VIDEO" = false ]; then
+    CONVERT_ARGS+=(--skip-video)
+fi
+python3 "$SRC_DIR/convert_to_lerobot.py" "${CONVERT_ARGS[@]}"
 
 if [ ! -d "$LEROBOT_DIR" ]; then
     fail "格式转换失败: $LEROBOT_DIR 不存在"
