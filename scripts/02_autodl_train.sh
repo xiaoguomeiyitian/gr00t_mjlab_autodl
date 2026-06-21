@@ -1,20 +1,49 @@
 #!/usr/bin/env bash
 # ============================================================================
+# ⚠️  DEPRECATED — 此脚本为旧版"all-in-one"训练脚本, 已被新 6 步流程替代
+#
+# 新流程 (见 start.sh + scripts/):
+#   [0] 00_autodl_init.sh    一次性环境初始化 (克隆 GR00T + venv + 模型)
+#   [1] 01_local_collect.sh  本地 mjlab 收集数据
+#   [2] 02_upload_to_autodl.sh  上传训练包到云端
+#   [3] 03_autodl_train.sh   云端训练 (官方 launch_finetune.py, 无 LoRA bug)
+#   [4] 04_download_model.sh 下载模型到本地
+#   [5] 05_local_quantize.sh 本地 INT4 量化 (可选)
+#   [6] 06_local_verify.sh   本地推理验证
+#
+# 旧版问题:
+#   1. 假设 Isaac-GR00T 训练使用 LoRA (--use-lora), 但官方实际不支持 LoRA
+#      (peft 是依赖但未调用), 该参数会让 tyro.cli 报错
+#   2. 使用 --num-epochs, 但官方 FinetuneConfig 只有 --max-steps
+#   3. 路径硬编码 /workspace/ (非 AutoDL 默认 /root/), 兼容性差
+#
+# 此脚本仅保留以防需要回退, 强烈建议改用 start.sh 统一入口
+# ============================================================================
+# 原内容 (保留供回退参考):
+#
 # 第 2 步: AutoDL 云端环境搭建 + Fine-tune 训练
 #
-# 运行环境: AutoDL 云端实例 (RTX 5090 32GB / A100)
+# 运行环境: AutoDL 云端实例 (A100 40GB+ / L40 48GB / H100 推荐)
+#          V100-32GB / RTX 5090-32GB 边缘可行 (需小 batch)
 # 作用: 克隆 GR00T → 安装依赖 → 下载模型 → 解压数据 → Fine-tune → INT4 量化 → 打包
 #
 # 前置条件:
 #   - 已上传 {robot}_gr00t_training.tar.gz 到 /root/workspace/
-#   - 实例镜像选择 PyTorch 2.11 + CUDA 12.4
+#   - 实例镜像选择 PyTorch 2.7+ + CUDA 12.6+
 #
-# 用法:
+# 用法 (DEPRECATED):
 #   bash 02_autodl_train.sh --robot g1
 #   bash 02_autodl_train.sh --robot g1 --epochs 20 --batch-size 2
-#   bash 02_autodl_train.sh --robot g1 --skip-setup  # 跳过环境搭建 (第二次训练)
+#   bash 02_autodl_train.sh --robot g1 --skip-setup  # 跳过环境搭建
 # ============================================================================
 set -euo pipefail
+
+# 一进来就警告
+echo -e "\033[1;33m[⚠️  DEPRECATED]\033[0m 02_autodl_train.sh 是旧版 all-in-one 脚本"
+echo -e "   建议改用新流程:  \033[0;36m./start.sh 3\033[0m  (云端训练)"
+echo -e "   完整流程入口:    \033[0;36m./start.sh\033[0m  (交互式菜单)"
+echo -e "   或单独运行:      \033[0;36mbash scripts/03_autodl_train.sh --robot g1\033[0m"
+echo ""
 
 # ── 颜色 ────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'
@@ -170,16 +199,25 @@ step "Phase 2: Fine-tune 训练..."
 cd "$GR00T_REPO"
 source .venv/bin/activate 2>/dev/null || true
 
+# 估算 max_steps (官方训练只接 max-steps, 不接 num-epochs)
+EPISODE_COUNT=$(find "$LEROBOT_DATA_DIR/data" -name "*.parquet" 2>/dev/null | wc -l)
+ASSUMED_FRAMES_PER_EP=50
+EFFECTIVE_BATCH=$((BATCH_SIZE * GRAD_ACCUM))
+MAX_STEPS=$(( (EPISODE_COUNT * ASSUMED_FRAMES_PER_EP * NUM_EPOCHS + EFFECTIVE_BATCH - 1) / EFFECTIVE_BATCH ))
+[ "$MAX_STEPS" -lt 100 ] && MAX_STEPS=100
+log "max_steps=$MAX_STEPS  (${EPISODE_COUNT} episodes × ${NUM_EPOCHS} epochs × ~${ASSUMED_FRAMES_PER_EP}f / (${BATCH_SIZE}×${GRAD_ACCUM}))"
+
 python3 gr00t/experiment/launch_finetune.py \
     --base-model-path "/workspace/models/GR00T-N1-${MODEL_SIZE}" \
     --dataset-path "$LEROBOT_DATA_DIR" \
     --output-dir "$OUTPUT_DIR" \
-    --num-epochs "$NUM_EPOCHS" \
-    --batch-size "$BATCH_SIZE" \
-    --grad-accum "$GRAD_ACCUM" \
-    --learning-rate "$LEARNING_RATE" \
     --embodiment-tag "NEW_EMBODIMENT" \
-    --use-lora
+    --max-steps "$MAX_STEPS" \
+    --global-batch-size "$BATCH_SIZE" \
+    --gradient-accumulation-steps "$GRAD_ACCUM" \
+    --learning-rate "$LEARNING_RATE" \
+    --num-gpus 1 \
+    --save-only-model
 
 info "✅ Fine-tune 训练完成"
 

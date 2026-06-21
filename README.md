@@ -9,23 +9,23 @@
 ## 📐 架构总览
 
 ```
-本地 (Linux + GPU)                                  AutoDL 云端 (RTX 5090 / A100)
-┌─────────────────────────────────┐                 ┌──────────────────────────────┐
-│ ① unitree_rl_mjlab 仿真         │                 │                              │
-│   mjlab (MuJoCo) 物理引擎      │  SCP 上传 [2]   │  Isaac-GR00T 仓库            │
-│   G1 (29 joints) / Go2 (12)    │ ──────────────▶│  - GR00T-N1.7-3B 模型       │
-│   Task: Unitree-{G1,Go2}-Flat   │                 │  - LeRobot v2 数据           │
-│   脚本化步态 (G1/Go2)           │  SCP 下载 [4]   │  - Fine-tune (LoRA)         │
-│                                 │ ◀──────────────│  - Phase 3: FP16 全量 (~7GB) │
-│ ③ 本地 INT4 量化 (可选) [5]     │                 │  - Phase 3.5: INT4 (~1.5GB) │
-│   FP16 → INT4 PTQ (8GB 友好)   │                 │  - Phase 4: 双模型打包      │
-│ ② 转换 LeRobot v2               │                 │                              │
-│   parquet + modality.json       │                 │                              │
-│ ④ 本地推理验证 [6]              │                 │                              │
-│   ★ 高显存 (24GB+) → FP16       │                 │                              │
-│   ★ 低显存 (8GB)  → INT4        │                 │                              │
-│   mjlab Viser 回放              │                 │                              │
-└─────────────────────────────────┘                 └──────────────────────────────┘
+本地 (Linux + GPU)                                  AutoDL 云端 (A100 40GB / L40 48GB / H100)
+┌─────────────────────────────────┐                 ┌──────────────────────────────────┐
+│ ① unitree_rl_mjlab 仿真         │                 │                                  │
+│   mjlab (MuJoCo) 物理引擎      │  SCP 上传 [2]   │  Isaac-GR00T 仓库                │
+│   G1 (29 joints) / Go2 (12)    │ ──────────────▶│  - GR00T-N1.7-3B 模型 (7GB)     │
+│   Task: Unitree-{G1,Go2}-Flat   │                 │  - LeRobot v2 数据               │
+│   脚本化步态 (G1/Go2)           │  SCP 下载 [4]   │  - Fine-tune (官方默认)          │
+│                                 │ ◀──────────────│  - Phase 3: BF16 完整 (~7GB)    │
+│ ③ 本地 INT4 量化 (可选) [5]     │                 │  - Phase 3.5: INT4 (~1.5GB)    │
+│   FP16 → INT4 PTQ (16GB 友好)  │                 │  - Phase 4: 双模型打包          │
+│ ② 转换 LeRobot v2               │                 │                                  │
+│   parquet + modality.json       │                 │  ⚠️ 官方训练**不支持 LoRA**       │
+│ ④ 本地推理验证 [6]              │                 │    (peft 装但未使用)             │
+│   ★ 16GB+ VRAM → BF16          │                 │    训练输出本身就是 final model │
+│   ★ 8GB  VRAM  → INT4          │                 │                                  │
+│   mjlab Viser 回放              │                 │                                  │
+└─────────────────────────────────┘                 └──────────────────────────────────┘
 ```
 
 ---
@@ -259,15 +259,16 @@ cd gr00t_mjlab_autodl/
 
 # [3] 云端训练: 远程触发 (在云端解压 + 训练 + 打包)
 ./scripts/03_autodl_train.sh --robot g1 --epochs 20    # 在云端执行
-#   产物: 远端 /root/workspace/g1_gr00t_full_fp16.tar.gz (含 INT4)
+#   产物: 远端 /root/workspace/g1_gr00t_model.tar.gz (含 INT4)
+#   (旧名 _full_fp16.tar.gz 已改为 symlink 兼容)
 
 # [4] 下载模型到本地
 ./scripts/04_download_model.sh --robot g1
-#   产物: 本地 models/g1_gr00t_full_fp16/
+#   产物: 本地 models/g1_gr00t/  (训练输出, BF16 完整模型, ~7GB)
 
-# [5] 本地量化 (可选, 8GB 显存友好)
+# [5] 本地量化 (可选, 16GB+ 显存友好)
 ./scripts/05_local_quantize.sh --robot g1
-#   产物: 本地 models/g1_gr00t_int4/
+#   产物: 本地 models/g1_gr00t_int4/  (INT4 量化, ~1.5GB)
 
 # [6] 本地推理验证
 ./scripts/06_local_verify.sh --robot g1
@@ -298,12 +299,15 @@ cd /root/workspace
 tar -xzf g1_gr00t_training.tar.gz
 source /root/Isaac-GR00T/.venv/bin/activate
 cd /root/Isaac-GR00T
+# 注: 官方 FinetuneConfig 用 --max-steps, --global-batch-size, --gradient-accumulation-steps
+#     不支持 --num-epochs 和 --use-lora (本项目 03_autodl_train.sh 已封装好)
 python3 gr00t/experiment/launch_finetune.py \
     --base-model-path /root/models/GR00T-N1-1.7-3B \
     --dataset-path /root/data/g1_lerobot \
     --output-dir /root/models/g1_gr00t \
-    --num-epochs 10 --batch-size 2 --grad-accum 2 --learning-rate 1e-4 \
-    --embodiment-tag NEW_EMBODIMENT --use-lora
+    --max-steps 5000 --global-batch-size 2 \
+    --gradient-accumulation-steps 2 --learning-rate 1e-4 \
+    --embodiment-tag NEW_EMBODIMENT --save-only-model
 ```
 
 > **回本地下载模型**: 用 [4] 脚本 `./scripts/04_download_model.sh --robot g1`
@@ -496,12 +500,71 @@ data/g1_lerobot/
 
 ## 🖥️ AutoDL 实例配置
 
-| 配置项 | 推荐值 |
-|--------|--------|
-| GPU | RTX 5090 32GB (性价比最高) |
-| 镜像 | PyTorch 2.11 + CUDA 12.4 |
-| 磁盘 | ≥100GB |
-| 内存 | ≥32GB |
+> **配置要求基于 [Isaac-GR00T 官方 `getting_started/hardware_recommendation.md`](https://github.com/NVIDIA/Isaac-GR00T/blob/main/getting_started/hardware_recommendation.md) (v1.7)**
+> 项目不内嵌任何未经官方验证的硬件推荐。
+
+### GPU 推荐 (按官方背书排序)
+
+| 等级 | GPU | VRAM | 训练支持 | 备注 |
+|------|-----|------|---------|------|
+| ⭐ **官方推荐** | **A100** | 40-80 GB | 默认配置即可 | 性价比最均衡, AutoDL 平台常见 |
+| ⭐ **官方推荐** | **L40** | 48 GB | 默认配置即可 | 推理频率 26 Hz (TensorRT) |
+| ⭐ **官方推荐** | **H100** | 40-80 GB | 默认 + 多卡扩展 | 训练速度最快 (~4× A100) |
+| 🟡 官方未测但理论可行 | RTX 5090 | 32 GB | ⚠️ 低于官方最低 40GB, 需 `--batch-size 1` + gradient checkpointing | 不在官方背书清单 |
+| 🟡 官方未测但理论可行 | V100-32GB | 32 GB | ⚠️ 同上, 且 CUDA 13+ PyTorch wheel 不含 sm_70 二进制 | 不在官方背书清单 |
+| 🟡 官方可接受 | A6000 | 48 GB | "works but may require longer training time" (官方原话) | |
+| 🟢 边缘 (仅推理) | RTX 4090 | 24 GB | ❌ 训练 OOM; 推理 BF16 需谨慎 | 仅本地 [6] 推理用 |
+| ❌ 不推荐 | < 24 GB | — | ❌ 训练 OOM; 推理仅 INT4 | |
+
+> ⚠️ **32 GB 显存 (RTX 5090 / V100) 不在官方推荐清单**。官方最低是 40 GB+。本项目不会主动推荐 32 GB 显卡跑训练, 因为：
+> - 官方默认配置 peak VRAM ~35 GB (已 3 GB 溢出)
+> - 32 GB 显卡需要 `--batch-size 1 --grad-accum 16` + 开 gradient checkpointing, 训练速度慢
+> - V100 + CUDA 13.0 还有 sm_70 二进制兼容风险
+>
+> 如果一定要用, 建议用 `02_upload_to_autodl.sh` 上传后, 在云端先跑 `--epochs 1` smoke test 验证再续费。
+
+### 软件需求 (官方要求)
+
+| 项目 | 版本 |
+|------|------|
+| Python | 3.10 |
+| CUDA | 12.6+ (dGPU) / 13.0 (Jetson Thor/DGX Spark) |
+| PyTorch | 2.7+ |
+| OS | Ubuntu 22.04+ |
+| 包管理器 | `uv` (官方推荐) |
+
+> 镜像选择 AutoDL 市场搜索 **"PyTorch 2.7+ CUDA 12.6+"**。不推荐 PyTorch 2.11 / CUDA 12.4 老镜像 (官方已升级到 2.7+)。
+> 国内网络可加 `--hf-endpoint https://hf-mirror.com` 和 `--pip-mirror aliyun` 加速 (见 `00_autodl_init.sh --help`)。
+
+### 训练策略 (官方默认 vs 进阶)
+
+| 模式 | 调优范围 | Peak VRAM | 速度 | 适用 |
+|------|---------|-----------|------|------|
+| **官方默认** ⭐ | projector + diffusion action head | < 35 GB | 100% | 大多数场景, 40 GB+ 显卡推荐 |
+| `--tune-llm` | + LLM backbone | 80 GB+ | 慢 | 大数据量, 数据复杂时 |
+| `--tune-visual` | + visual encoder (ViT) | 80 GB+ | 慢 | 视觉差异大时 |
+| ⚠️ **LoRA** | — | — | — | **官方不支持** (`peft` 是依赖但未调用) |
+
+> **本项目训练不依赖 LoRA**。Isaac-GR00T 官方训练策略是: 全模型加载 + 只更新 projector/diffusion (默认) 或 LLM/visual (进阶)。训练输出 (BF16) 本身就是完整可推理模型, **无需 merge 步骤**。
+
+### 存储需求 (官方建议)
+
+| 项目 | 最低 | 推荐 | 备注 |
+|------|------|------|------|
+| 系统盘 | 30 GB | 50 GB | Ubuntu + Docker + PyTorch + GR00T 仓库 |
+| 数据盘 | 100 GB | 500 GB+ | 数据集 (~50 episodes ≈ 50-100 GB) + checkpoint (~25 GB) + INT4 (~1.5 GB) |
+| 网络存储 | — | NFS/S3 | 生产环境 (官方推荐) |
+
+### 内存 / CPU
+
+- **系统 RAM**: 官方未明确要求, 至少 32 GB。数据集通过 `--num-shards-per-epoch` 控制预加载量, 内存不足可减小该值。
+- **CPU**: 8 核+ (官方未明确, GR00T 数据加载是 CPU 密集型, dataloader 默认 2 workers)
+
+### 多卡训练 (进阶)
+
+官方支持 `torchrun --nproc_per_node=N` 多卡训练。本项目默认单卡, 多卡时需要:
+- 在云端手动跑 `torchrun`, 或
+- 修改 `03_autodl_train.sh` 调用, 加 `--num-gpus N` (官方参数)
 
 ---
 

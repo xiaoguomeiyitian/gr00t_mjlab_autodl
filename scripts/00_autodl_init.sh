@@ -26,7 +26,7 @@
 #   bash 00_autodl_init.sh --gr00t-repo /root/Isaac-GR00T \
 #                           --models-dir /root/models
 #
-#   # 跳过基础模型下载 (本地已有 FP16 模型, 想直接 LoRA)
+#   # 跳过基础模型下载 (本地已有 FP16 模型, 想直接训练)
 #   bash 00_autodl_init.sh --skip-base-model
 #
 #   # 从本地 tarball 解压 (含 .git, 跳过 GitHub clone, 推荐国内场景)
@@ -451,11 +451,15 @@ echo -e "     python3 gr00t/experiment/launch_finetune.py \\"
 echo -e "         --base-model-path $BASE_MODEL_DIR \\"
 echo -e "         --dataset-path $DATA_DIR/g1_lerobot \\"
 echo -e "         --output-dir $MODELS_DIR/g1_gr00t \\"
-echo -e "         --num-epochs 10 --batch-size 2 --grad-accum 2 \\"
+echo -e "         --max-steps 5000 --global-batch-size 2 \\"
+echo -e "         --gradient-accumulation-steps 2 \\"
 echo -e "         --learning-rate 1e-4 \\"
-echo -e "         --embodiment-tag NEW_EMBODIMENT --use-lora"
+echo -e "         --embodiment-tag NEW_EMBODIMENT \\"
+echo -e "         --save-only-model"
 echo ""
-echo -e "${BLUE}  # 或: 直接调用 02_autodl_train.sh (默认跳过环境搭建)${NC}"
-echo -e "     bash 02_autodl_train.sh --robot g1 --epochs 10 --skip-setup"
+echo -e "${BLUE}  # 或: 直接调用新版 03_autodl_train.sh (推荐)${NC}"
+echo -e "     bash scripts/03_autodl_train.sh --robot g1 --epochs 10"
 echo ""
+echo -e "${BLUE}  # 或: 回到本地用 start.sh 统一入口 (推荐)${NC}"
+echo -e "     ./start.sh 3    # 在本地项目目录, 跳到云端训练步骤"
 hr

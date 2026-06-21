@@ -2,8 +2,16 @@
 # ============================================================================
 # 第 3 步: AutoDL 云端 Fine-tune 训练 (解压数据 + 训练 + 打包模型)
 #
-# 运行环境: AutoDL 云端实例 (RTX 5090 32GB / A100 推荐)
-# 作用: 解压 [2] 上传的训练包 → Fine-tune GR00T → INT4 量化 → 打包模型
+# 运行环境 (基于 Isaac-GR00T 官方 hardware_recommendation.md):
+#   ⭐ 推荐: A100-40GB+ / L40-48GB / H100-40GB+ (官方背书, peak < 35GB)
+#   ⚠️ 边缘: V100-32GB / RTX 5090-32GB (低于官方最低 40GB, 需小 batch + gradient checkpointing)
+#   ❌ 不支持: < 24GB 显存 (会 OOM)
+#
+# 训练策略 (GR00T 官方默认, 见 gr00t/experiment/launch_finetune.py):
+#   - 默认: 只微调 projector + diffusion action head (peak VRAM < 35GB)
+#   - 启用 --tune-llm 或 --tune-visual: 需要 80GB+ VRAM
+#   - 注: Isaac-GR00T 官方训练**不支持 LoRA** (peft 是依赖但未实际使用)
+#         训练输出 OUTPUT_DIR 本身就是完整可推理模型, 无需 merge
 #
 # 前置条件 (一次性):
 #   - 已运行 00_autodl_init.sh 初始化云端环境
@@ -14,9 +22,9 @@
 #
 # 用法 (在云端运行):
 #   bash 03_autodl_train.sh --robot g1
-#   bash 03_autodl_train.sh --robot g1 --epochs 20 --batch-size 2
-#   bash 03_autodl_train.sh --robot g1 --skip-fp16      # 云端只导出 INT4
-#   bash 03_autodl_train.sh --robot g1 --no-export-int4 # 完全跳过 INT4 (本地量化)
+#   bash 03_autodl_train.sh --robot g1 --epochs 10 --batch-size 2
+#   bash 03_autodl_train.sh --robot g1 --no-export-int4  # 完全跳过 INT4 (本地量化)
+#   bash 03_autodl_train.sh --robot g1 --max-steps 5000  # 直接指定步数 (官方参数)
 # ============================================================================
 set -euo pipefail
 
@@ -35,35 +43,41 @@ NUM_EPOCHS=10
 BATCH_SIZE=2
 GRAD_ACCUM=2
 LEARNING_RATE=1e-4
-SKIP_FP16=false            # 跳过 FP16 全量导出 (默认生成)
+MAX_STEPS=""               # 留空: 由 (episodes × epochs) 自动估算; 显式传值则覆盖
 SKIP_INT4=false            # 跳过 INT4 量化 (用 --no-export-int4)
+TUNE_LLM=false             # 官方默认 off (启用需 80GB+ VRAM)
+TUNE_VISUAL=false          # 官方默认 off (启用需 80GB+ VRAM)
+SAVE_ONLY_MODEL=true       # 只存模型权重 (省空间, 不可恢复训练)
 
 # 云端路径 (与 00_autodl_init.sh 保持一致)
 GR00T_REPO="/root/Isaac-GR00T"
 DATA_DIR="/root/data"
 MODELS_DIR="/root/models"
 BASE_MODEL_DIR=""          # 自动探测
-OUTPUT_DIR=""              # 默认 $MODELS_DIR/${ROBOT}_gr00t
-FULL_FP16_DIR=""           # 默认 $MODELS_DIR/${ROBOT}_gr00t_full_fp16
+OUTPUT_DIR=""              # 默认 $MODELS_DIR/${ROBOT}_gr00t  (训练输出 = final model)
 INT4_DIR=""                # 默认 $MODELS_DIR/${ROBOT}_gr00t_int4
 PACK_NAME=""               # 训练包 (自动探测)
 MODEL_SIZE="1.7-3B"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --robot)        ROBOT="$2";          shift 2 ;;
-        --epochs)       NUM_EPOCHS="$2";     shift 2 ;;
-        --batch-size)   BATCH_SIZE="$2";     shift 2 ;;
-        --grad-accum)   GRAD_ACCUM="$2";     shift 2 ;;
-        --lr)           LEARNING_RATE="$2";  shift 2 ;;
-        --data-dir)     DATA_DIR="$2";       shift 2 ;;
-        --models-dir)   MODELS_DIR="$2";     shift 2 ;;
-        --gr00t-repo)   GR00T_REPO="$2";     shift 2 ;;
-        --model-size)   MODEL_SIZE="$2";     shift 2 ;;
-        --skip-fp16)    SKIP_FP16=true;      shift   ;;
-        --no-export-int4) SKIP_INT4=true;    shift   ;;
+        --robot)            ROBOT="$2";            shift 2 ;;
+        --epochs)           NUM_EPOCHS="$2";       shift 2 ;;
+        --batch-size)       BATCH_SIZE="$2";       shift 2 ;;
+        --grad-accum)       GRAD_ACCUM="$2";       shift 2 ;;
+        --max-steps)        MAX_STEPS="$2";        shift 2 ;;
+        --lr)               LEARNING_RATE="$2";    shift 2 ;;
+        --data-dir)         DATA_DIR="$2";         shift 2 ;;
+        --models-dir)       MODELS_DIR="$2";       shift 2 ;;
+        --gr00t-repo)       GR00T_REPO="$2";       shift 2 ;;
+        --model-size)       MODEL_SIZE="$2";       shift 2 ;;
+        --no-export-int4)   SKIP_INT4=true;        shift   ;;
+        --tune-llm)         TUNE_LLM=true;         shift   ;;
+        --tune-visual)      TUNE_VISUAL=true;      shift   ;;
+        --save-only-model)  SAVE_ONLY_MODEL=true;  shift   ;;
+        --no-save-only-model) SAVE_ONLY_MODEL=false; shift ;;
         -h|--help)
-            sed -n '2,15p' "$0"
+            sed -n '2,32p' "$0"
             exit 0
             ;;
         *) fail "未知参数: $1" ;;
@@ -73,12 +87,12 @@ done
 # ── 路径归一化 ─────────────────────────────────────────────────────────────
 PACK_NAME="${ROBOT}_gr00t_training.tar.gz"
 LEROBOT_DATA_DIR="$DATA_DIR/${ROBOT}_lerobot"
-OUTPUT_DIR="${OUTPUT_DIR:-$MODELS_DIR/${ROBOT}_gr00t}"
-FULL_FP16_DIR="${FULL_FP16_DIR:-$MODELS_DIR/${ROBOT}_gr00t_full_fp16}"
+OUTPUT_DIR="${OUTPUT_DIR:-$MODELS_DIR/${ROBOT}_gr00t}"     # 训练输出 (final model, 可直接推理)
 INT4_DIR="${INT4_DIR:-$MODELS_DIR/${ROBOT}_gr00t_int4}"
+MODEL_PACK_NAME="${ROBOT}_gr00t_model.tar.gz"               # 最终 BF16 模型包
+INT4_PACK_NAME="${ROBOT}_gr00t_int4_model.tar.gz"           # INT4 量化包
+# 兼容旧名 (旧文档/04_download_model.sh 可能还在引用)
 FULL_FP16_PACK_NAME="${ROBOT}_gr00t_full_fp16.tar.gz"
-INT4_PACK_NAME="${ROBOT}_gr00t_int4_model.tar.gz"
-MODEL_PACK_NAME="${ROBOT}_gr00t_model.tar.gz"   # FP16 别名 (兼容旧脚本)
 
 # 自动探测基础模型
 if [ -z "$BASE_MODEL_DIR" ]; then
@@ -105,10 +119,12 @@ info "模型:          GR00T-N1-$MODEL_SIZE"
 info "Epochs:        $NUM_EPOCHS"
 info "Batch Size:    $BATCH_SIZE × $GRAD_ACCUM = $((BATCH_SIZE * GRAD_ACCUM))"
 info "Learning Rate: $LEARNING_RATE"
+info "Tune LLM:      $TUNE_LLM  (官方默认 off; 启用需 80GB+ VRAM)"
+info "Tune Visual:   $TUNE_VISUAL  (官方默认 off; 启用需 80GB+ VRAM)"
+info "Save Only:     $SAVE_ONLY_MODEL  (true=省空间, false=可恢复训练)"
 info "GR00T 仓库:    $GR00T_REPO"
 info "数据目录:      $LEROBOT_DATA_DIR"
-info "输出 LoRA:     $OUTPUT_DIR"
-info "FP16 全量:     $([ "$SKIP_FP16" = true ] && echo '跳过' || echo "$FULL_FP16_DIR")"
+info "输出 (final):  $OUTPUT_DIR  (官方训练输出, 直接可推理)"
 info "INT4 量化:     $([ "$SKIP_INT4" = true ] && echo '跳过' || echo "$INT4_DIR")"
 echo ""
 
@@ -183,72 +199,58 @@ info "Episode 数: $EPISODE_COUNT"
 echo ""
 
 # ════════════════════════════════════════════════════════════════════════════
-# Phase 2: Fine-tune 训练 (LoRA)
+# Phase 2: Fine-tune 训练 (官方默认: projector + diffusion, 关闭 LLM/visual)
 # ════════════════════════════════════════════════════════════════════════════
-step "Phase 2/4: Fine-tune 训练 (LoRA)..."
+step "Phase 2/3: Fine-tune 训练..."
 cd "$GR00T_REPO"
-
 mkdir -p "$OUTPUT_DIR"
+
+# 估算 max_steps (如果用户没显式指定)
+# 公式: steps = (episodes × assumed_frames × epochs) / (batch × grad_accum)
+# 假设平均每 episode ~50 帧 (GR00T 官方 LeRobotDataConfig 常见)
+if [ -z "$MAX_STEPS" ]; then
+    ASSUMED_FRAMES_PER_EP=50
+    EFFECTIVE_BATCH=$((BATCH_SIZE * GRAD_ACCUM))
+    MAX_STEPS=$(( (EPISODE_COUNT * ASSUMED_FRAMES_PER_EP * NUM_EPOCHS + EFFECTIVE_BATCH - 1) / EFFECTIVE_BATCH ))
+    [ "$MAX_STEPS" -lt 100 ] && MAX_STEPS=100   # 下限保护
+    info "自动估算 max_steps=$MAX_STEPS  (${EPISODE_COUNT} episodes × ${NUM_EPOCHS} epochs × ~${ASSUMED_FRAMES_PER_EP}f / (${BATCH_SIZE}×${GRAD_ACCUM}))"
+fi
+
+# 构造条件参数 (tyro 不接受空字符串, 只在启用时才传)
+EXTRA_ARGS=()
+[ "$TUNE_LLM" = true ]    && EXTRA_ARGS+=(--tune-llm)
+[ "$TUNE_VISUAL" = true ] && EXTRA_ARGS+=(--tune-visual)
+[ "$SAVE_ONLY_MODEL" = true ] && EXTRA_ARGS+=(--save-only-model)
+
 python3 gr00t/experiment/launch_finetune.py \
     --base-model-path "$BASE_MODEL_DIR" \
     --dataset-path "$LEROBOT_DATA_DIR" \
     --output-dir "$OUTPUT_DIR" \
-    --num-epochs "$NUM_EPOCHS" \
-    --batch-size "$BATCH_SIZE" \
-    --grad-accum "$GRAD_ACCUM" \
-    --learning-rate "$LEARNING_RATE" \
     --embodiment-tag "NEW_EMBODIMENT" \
-    --use-lora
+    --max-steps "$MAX_STEPS" \
+    --global-batch-size "$BATCH_SIZE" \
+    --gradient-accumulation-steps "$GRAD_ACCUM" \
+    --learning-rate "$LEARNING_RATE" \
+    --num-gpus 1 \
+    "${EXTRA_ARGS[@]}"
 
-info "✅ Fine-tune 训练完成"
+info "✅ Fine-tune 训练完成 (输出: $OUTPUT_DIR)"
 echo ""
 
 # ════════════════════════════════════════════════════════════════════════════
-# Phase 3: 合并 LoRA → FP16 全量 (可选)
-# ════════════════════════════════════════════════════════════════════════════
-if $SKIP_FP16; then
-    warn "Phase 3: 跳过 FP16 全量导出 (--skip-fp16)"
-    FULL_FP16_DIR=""
-else
-    step "Phase 3/4: 合并 LoRA → FP16 全量模型..."
-
-    MERGE_SCRIPT="/root/gr00t_mjlab_autodl/src/merge_lora.py"
-    if [ ! -f "$MERGE_SCRIPT" ]; then
-        # fallback: 随训练脚本同步上传的旧路径
-        MERGE_SCRIPT="/root/workspace/gr00t_mjlab_autodl/src/merge_lora.py"
-    fi
-    if [ ! -f "$MERGE_SCRIPT" ]; then
-        warn "未找到 merge_lora.py, 跳过 FP16 全量生成"
-        FULL_FP16_DIR=""
-    else
-        python3 "$MERGE_SCRIPT" \
-            --base-model "$BASE_MODEL_DIR" \
-            --lora-path "$OUTPUT_DIR" \
-            --output-dir "$FULL_FP16_DIR"
-        info "✅ FP16 全量模型: $FULL_FP16_DIR"
-    fi
-fi
-echo ""
-
-# ════════════════════════════════════════════════════════════════════════════
-# Phase 3.5: INT4 量化导出 (可选)
+# Phase 3: INT4 量化导出 (可选)
+#   注: GR00T 官方训练不支持 LoRA, 故无 "LoRA → FP16" 合并步骤
+#       训练输出 (OUTPUT_DIR) 本身就是完整可推理模型, 直接做 INT4 PTQ
 # ════════════════════════════════════════════════════════════════════════════
 if $SKIP_INT4; then
-    warn "Phase 3.5: 跳过 INT4 量化 (--no-export-int4)"
+    warn "Phase 3: 跳过 INT4 量化 (--no-export-int4)"
     INT4_DIR=""
 else
-    step "Phase 3.5/4: INT4 量化导出..."
+    step "Phase 3/3: INT4 量化导出..."
 
     EXPORT_SCRIPT="/root/gr00t_mjlab_autodl/src/export_int4.py"
     if [ ! -f "$EXPORT_SCRIPT" ]; then
         EXPORT_SCRIPT="/root/workspace/gr00t_mjlab_autodl/src/export_int4.py"
-    fi
-
-    # 量化输入: 优先 FP16 全量 (质量更好), 否则 LoRA 合并产物
-    QUANT_INPUT="$FULL_FP16_DIR"
-    if [ -z "$QUANT_INPUT" ] || [ ! -d "$QUANT_INPUT" ]; then
-        QUANT_INPUT="$OUTPUT_DIR"   # LoRA 也能直接量化
-        warn "未找到 FP16 全量, 用 LoRA 产物 ($QUANT_INPUT) 做 INT4 量化"
     fi
 
     if [ ! -f "$EXPORT_SCRIPT" ]; then
@@ -257,7 +259,7 @@ else
     else
         python3 "$EXPORT_SCRIPT" \
             --input-type fp16 \
-            --model-dir "$QUANT_INPUT" \
+            --model-dir "$OUTPUT_DIR" \
             --output-dir "$INT4_DIR" \
             --model-path "$BASE_MODEL_DIR"
         info "✅ INT4 量化模型: $INT4_DIR"
@@ -268,7 +270,7 @@ echo ""
 # ════════════════════════════════════════════════════════════════════════════
 # Phase 4: 打包模型
 # ════════════════════════════════════════════════════════════════════════════
-step "Phase 4/4: 打包模型..."
+step "打包模型..."
 
 PACK_BASE_DIR="/root/workspace"
 mkdir -p "$PACK_BASE_DIR"
@@ -276,25 +278,21 @@ cd "$MODELS_DIR"
 
 PACK_COUNT=0
 
-# ── FP16 全量包 ────────────────────────────────────────────────────────────
-if [ -n "$FULL_FP16_DIR" ] && [ -d "$FULL_FP16_DIR" ]; then
-    tar -czf "$PACK_BASE_DIR/$FULL_FP16_PACK_NAME" \
-        -C "$(dirname "$FULL_FP16_DIR")" "$(basename "$FULL_FP16_DIR")"
-    FP16_SIZE=$(du -h "$PACK_BASE_DIR/$FULL_FP16_PACK_NAME" | cut -f1)
-    info "✅ FP16 全量包: $FULL_FP16_PACK_NAME ($FP16_SIZE) → $PACK_BASE_DIR/"
-    # 别名 (兼容)
-    cp "$PACK_BASE_DIR/$FULL_FP16_PACK_NAME" "$PACK_BASE_DIR/$MODEL_PACK_NAME"
-    PACK_COUNT=$((PACK_COUNT + 1))
-else
-    # 仅打包 LoRA
+# ── Final model 包 (BF16 完整模型, 用于 40GB+ 显存推理) ─────────────
+if [ -d "$OUTPUT_DIR" ]; then
     tar -czf "$PACK_BASE_DIR/$MODEL_PACK_NAME" \
         -C "$(dirname "$OUTPUT_DIR")" "$(basename "$OUTPUT_DIR")"
-    LORA_SIZE=$(du -h "$PACK_BASE_DIR/$MODEL_PACK_NAME" | cut -f1)
-    warn "LoRA adapter 包: $MODEL_PACK_NAME ($LORA_SIZE)"
+    MODEL_SIZE_H=$(du -h "$PACK_BASE_DIR/$MODEL_PACK_NAME" | cut -f1)
+    info "✅ 最终模型包: $MODEL_PACK_NAME ($MODEL_SIZE_H) → $PACK_BASE_DIR/"
     PACK_COUNT=$((PACK_COUNT + 1))
+
+    # 旧名兼容 (symlink, 不复制以省空间)
+    if [ "$MODEL_PACK_NAME" != "$FULL_FP16_PACK_NAME" ]; then
+        ln -sf "$MODEL_PACK_NAME" "$PACK_BASE_DIR/$FULL_FP16_PACK_NAME" 2>/dev/null || true
+    fi
 fi
 
-# ── INT4 量化包 ────────────────────────────────────────────────────────────
+# ── INT4 量化包 (~1.5GB, 用于 16GB+ 显存推理) ───────────────────────
 if [ -n "$INT4_DIR" ] && [ -d "$INT4_DIR" ]; then
     tar -czf "$PACK_BASE_DIR/$INT4_PACK_NAME" \
         -C "$(dirname "$INT4_DIR")" "$(basename "$INT4_DIR")"
@@ -312,12 +310,12 @@ echo ""
 echo -e "${GREEN}🎉 第 3 步完成!${NC}"
 echo ""
 echo "云端生成的模型包 ($PACK_COUNT 个):"
-[ -f "$PACK_BASE_DIR/$FULL_FP16_PACK_NAME" ] && \
-    echo "  📦 $PACK_BASE_DIR/$FULL_FP16_PACK_NAME  (FP16 全量, ~7GB, 高显存 GPU)"
-[ -f "$PACK_BASE_DIR/$MODEL_PACK_NAME" ] && [ "$MODEL_PACK_NAME" != "$FULL_FP16_PACK_NAME" ] && \
-    echo "  📦 $PACK_BASE_DIR/$MODEL_PACK_NAME       (FP16 别名, 兼容)"
+[ -f "$PACK_BASE_DIR/$MODEL_PACK_NAME" ] && \
+    echo "  📦 $PACK_BASE_DIR/$MODEL_PACK_NAME  (~7GB, BF16 完整模型, 用于 40GB+ 显存)"
+[ -f "$PACK_BASE_DIR/$FULL_FP16_PACK_NAME" ] && [ "$MODEL_PACK_NAME" != "$FULL_FP16_PACK_NAME" ] && \
+    echo "  📦 $PACK_BASE_DIR/$FULL_FP16_PACK_NAME  (→ symlink, 旧名兼容)"
 [ -f "$PACK_BASE_DIR/$INT4_PACK_NAME" ] && \
-    echo "  📦 $PACK_BASE_DIR/$INT4_PACK_NAME         (INT4 量化, ~1.5GB, 低显存 GPU)"
+    echo "  📦 $PACK_BASE_DIR/$INT4_PACK_NAME    (~1.5GB, INT4 量化, 用于 16GB+ 显存)"
 echo ""
 echo -e "${BOLD}进入第 4 步: 本地下载${NC}"
 echo ""
