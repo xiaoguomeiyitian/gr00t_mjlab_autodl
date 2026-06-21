@@ -45,6 +45,7 @@ gr00t_mjlab_autodl/                # 本项目 (与 unitree_rl_mjlab/ 同级)
 ├── start.sh                        # 🐳 Docker 容器启动 (模式选择 + GPU 检测)
 │
 ├── scripts/
+│   ├── 00_autodl_init.sh          # [0] 云端环境初始化 (一次性, 拆自 02)
 │   ├── 01_local_collect.sh         # [1] 数据采集: 本地 mjlab 收集 + 打包
 │   ├── 02_autodl_train.sh          # [2] 云端训练: AutoDL LoRA + FP16 (默认) + INT4
 │   ├── 03_download_model.sh        # [3] 模型下载: SCP 下载 (默认仅 FP16)
@@ -208,6 +209,33 @@ cd gr00t_mjlab_autodl/
 
 # [2] 云端训练: 上传到 AutoDL 实例并执行 (SSH 自动)
 #    也可以手动: 上传训练包 → ssh 登录 → bash 02_autodl_train.sh --robot g1 --epochs 20
+```
+
+### 方式二.5: 云端手动分步 (推荐首次使用, 灵活排错)
+
+云端训练 **不依赖 unitree_rl_mjlab** (仿真框架仅本地采集数据用), 云端只需 Isaac-GR00T + LeRobot v2 数据集 + LoRA。
+
+```bash
+# ── A. AutoDL 控制台: 开实例 → 选 PyTorch 2.x + CUDA 12.x 镜像 → 开机 ──
+
+# ── B. ssh 登录 AutoDL, 一次性初始化环境 ──
+ssh root@xxx.autodl.com -p 12345
+bash 00_autodl_init.sh                   # 一键: 系统依赖 + uv + Isaac-GR00T + Python 3.10 venv + 训练栈 + 基础模型
+
+# ── C. 上传本地训练数据 (在本地执行) ──
+scp g1_gr00t_training.tar.gz root@xxx.autodl.com:/workspace/
+
+# ── D. 回到云端, 解压 + 启动训练 ──
+cd /workspace && tar -xzf g1_gr00t_training.tar.gz
+source /workspace/Isaac-GR00T/.venv/bin/activate
+cd /workspace/Isaac-GR00T
+python3 gr00t/experiment/launch_finetune.py \
+    --base-model-path /workspace/models/GR00T-N1-1.7-3B \
+    --dataset-path /workspace/data/g1_lerobot \
+    --output-dir /workspace/models/g1_gr00t \
+    --num-epochs 10 --batch-size 2 --grad-accum 2 --learning-rate 1e-4 \
+    --embodiment-tag NEW_EMBODIMENT --use-lora
+```
 
 # [3] 模型下载: SCP 下载 FP16 全量 + INT4 量化 包
 ./scripts/03_download_model.sh root@xxx.autodl.com -p 12345 --robot g1
