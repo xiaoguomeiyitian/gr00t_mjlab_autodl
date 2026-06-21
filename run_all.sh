@@ -67,9 +67,9 @@ declare -A STEP_NAMES=(
 )
 declare -A STEP_DESCS=(
     [1]="本地 mjlab 收集 episodes 并打包为训练包"
-    [2]="AutoDL 上 LoRA 微调 + INT4 量化"
-    [3]="SCP 下载 FP16 全量 + INT4 量化模型包"
-    [4]="加载模型 + 验证推理输出"
+    [2]="AutoDL 上 LoRA 微调 (默认跳过 INT4 量化, 节省云端 GPU 时间)"
+    [3]="SCP 下载 FP16 全量模型 (默认, 可选 INT4)"
+    [4]="加载模型 + 验证推理输出 (可自动从 FP16 量化)"
 )
 
 # 取第 N 步的中文名 (如: step_label 1 → "数据采集")
@@ -104,6 +104,9 @@ SSH_HOST=""
 SSH_PORT=""
 SSH_PASS=""
 MODEL_SIZE="1.7-3B"
+WITH_INT4=false           # 默认只下载 FP16 (本地量化)
+AUTO_QUANTIZE=false       # 默认不自动本地量化
+SKIP_INT4_REMOTE=false    # 云端跳过 INT4 量化
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -115,6 +118,10 @@ while [[ $# -gt 0 ]]; do
         --ssh-host)      SSH_HOST="$2";           shift 2 ;;
         --ssh-port)      SSH_PORT="$2";           shift 2 ;;
         --model-size)    MODEL_SIZE="$2";         shift 2 ;;
+        # v2 优化参数
+        --with-int4)     WITH_INT4=true;          shift   ;;   # [3] 同时下 INT4
+        --auto-quantize) AUTO_QUANTIZE=true;      shift   ;;   # [4] 自动本地量化
+        --skip-int4-remote) SKIP_INT4_REMOTE=true; shift ;;   # [2] 云端跳过 INT4 量化
         -h|--help)
             echo "用法: $0 [--step SPEC] [--robot g1|go2] [--episodes N] [--epochs N]"
             echo "      [--instruction 'text'] [--ssh-host user@host] [--ssh-port PORT]"
@@ -130,10 +137,16 @@ while [[ $# -gt 0 ]]; do
             echo "  1,3,4              逗号分隔组合"
             echo "  1-3                范围展开 (等价于 1,2,3)"
             echo ""
+            echo "v2 优化选项 (推荐 8GB 显存用户):"
+            echo "  --with-int4        [3] 同时下载云端 INT4 包 (默认仅下 FP16, 本地量化)"
+            echo "  --auto-quantize    [4] 自动从 FP16 量化生成 INT4 (本地 8GB 推荐)"
+            echo "  --skip-int4-remote [2] 云端跳过 INT4 量化 (缩短云端 GPU 时间)"
+            echo ""
             echo "示例:"
             echo "  $0 --step 1                   # 只跑 [1] 数据采集"
-            echo "  $0 --step 2,3 --ssh-host user@host -p 12345   # 跑 [2] 云端训练 + [3] 模型下载"
-            echo "  $0 --step 1-3 --robot go2     # 跑 [1] 数据采集 → [2] 云端训练 → [3] 模型下载"
+            echo "  $0 --step 2,3 --ssh-host user@host -p 12345 --skip-int4-remote   # 云端训练(跳过INT4) + 仅下FP16"
+            echo "  $0 --step 4 --auto-quantize   # 本地推理 + 自动从 FP16 量化"
+            echo "  $0 --step all --auto-quantize --skip-int4-remote   # 完整优化流程"
             exit 0
             ;;
         *) fail "未知参数: $1" ;;
@@ -229,9 +242,10 @@ run_step2() {
     echo ""
 
     ssh -p "$SSH_PORT" -o StrictHostKeyChecking=no "$SSH_HOST" \
-        "cd ~/workspace && bash 02_autodl_train.sh --robot $ROBOT --epochs $NUM_EPOCHS --model-size $MODEL_SIZE"
+        "cd ~/workspace && bash 02_autodl_train.sh --robot $ROBOT --epochs $NUM_EPOCHS --model-size $MODEL_SIZE $( $SKIP_INT4_REMOTE && echo '--no-export-int4' )"
 
     info "✅ [2] 云端训练完成!"
+    $SKIP_INT4_REMOTE && info "  (云端跳过了 INT4 量化, 本地运行 ./scripts/05_local_quantize.sh 生成)"
 }
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -244,10 +258,14 @@ run_step3() {
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 
+    # 透传 --with-int4 参数
+    DL_ARGS=(--robot "$ROBOT")
+    $WITH_INT4 && DL_ARGS+=(--with-int4)
+
     if [ -n "$SSH_HOST" ] && [ -n "$SSH_PORT" ]; then
         bash "$SCRIPT_DIR/scripts/03_download_model.sh" \
             "$SSH_HOST" -p "$SSH_PORT" \
-            --robot "$ROBOT"
+            "${DL_ARGS[@]}"
     else
         warn "未提供 SSH 信息, 请手动下载:"
         echo "  ./scripts/03_download_model.sh root@xxx.autodl.com -p 12345 --robot $ROBOT"
@@ -264,9 +282,13 @@ run_step4() {
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 
-    bash "$SCRIPT_DIR/scripts/04_local_verify.sh" \
-        --robot "$ROBOT" \
+    VERIFY_ARGS=(
+        --robot "$ROBOT"
         --instruction "$INSTRUCTION"
+    )
+    $AUTO_QUANTIZE && VERIFY_ARGS+=(--auto-quantize)
+
+    bash "$SCRIPT_DIR/scripts/04_local_verify.sh" "${VERIFY_ARGS[@]}"
 }
 
 # ════════════════════════════════════════════════════════════════════════════

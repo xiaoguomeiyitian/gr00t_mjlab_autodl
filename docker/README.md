@@ -8,13 +8,12 @@
 本方案实施:
 1. **`/root/gr00t_mjlab_autodl/`** — `gr00t_mjlab_autodl` 项目源码 (含 `.git/`, `README.md`, `src/`, `scripts/`, `docker/`, `requirements.txt`)
 2. **`/root/unitree_rl_mjlab/`** — `unitree_rl_mjlab` 项目源码 (含 `.git/`, editable 安装)
-3. **`/root/unitree_sdk2_python/`** — `unitree_sdk2_python` 项目源码 (含 `.git/`, editable 安装)
-4. **`/root/Isaac-GR00T/`** — `train` 镜像专属, GR00T 官方仓库 (含 `.git/`, `uv sync` 安装)
-5. **健康检查** — base 镜像构建阶段执行 `git log` + `python3` 导入验证, 证明代码可执行
+3. **`/root/Isaac-GR00T/`** — `train` 镜像专属, GR00T 官方仓库 (含 `.git/`, `uv sync` 安装)
+4. **健康检查** — base 镜像构建阶段执行 `python3` 导入验证, 证明代码可执行
 
 任何镜像内均可直接:
 ```bash
-cd /root/gr00t_mjlab_autodl && python3 -c "import sys; sys.path.insert(0,'.'); from configs import g1_config; print('OK')"
+cd /root/gr00t_mjlab_autodl && python3 -c "import sys; sys.path.insert(0,'src'); from configs import g1_config; print('OK')"
 cd /root/Isaac-GR00T && python3 -c "import gr00t; print('OK')"
 ```
 
@@ -72,7 +71,6 @@ INSTRUCTION="walk forward" MODEL_PATH=/root/models/g1_gr00t_int4 ./start.sh infe
 /root/
 ├── gr00t_mjlab_autodl/          # 本项目 (含 .git/, AutoDL 合规)
 ├── unitree_rl_mjlab/             # 官方 mjlab (含 .git/, editable)
-├── unitree_sdk2_python/          # DDS SDK (含 .git/, editable)
 ├── Isaac-GR00T/                  # train 镜像专属 (含 .git/)
 ├── data/                         # 训练数据 (与宿主机双向同步)
 └── models/                       # 模型权重 (与宿主机双向同步)

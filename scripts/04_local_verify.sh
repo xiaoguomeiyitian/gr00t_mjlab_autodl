@@ -32,6 +32,7 @@ INSTRUCTION="walk forward"
 MAX_STEPS=200
 SHOW_VIEWER=false
 QUANTIZE="auto"
+AUTO_QUANTIZE=false   # 如果 INT4 不存在, 自动从 FP16 量化生成 (本地 8GB 推荐)
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -41,10 +42,34 @@ while [[ $# -gt 0 ]]; do
         --max-steps)    MAX_STEPS="$2";    shift 2 ;;
         --quantize)     QUANTIZE="$2";     shift 2 ;;
         --show-viewer)  SHOW_VIEWER=true;  shift   ;;
+        --auto-quantize) AUTO_QUANTIZE=true; shift ;;   # 自动从 FP16 量化
         -h|--help)
-            echo "用法: $0 [--robot g1|go2] [--model-path PATH]"
-            echo "      [--instruction 'text'] [--max-steps N]"
-            echo "      [--quantize auto|none|4bit|8bit] [--show-viewer]"
+            cat <<EOF
+用法: $0 [--robot g1|go2] [--model-path PATH] [选项]
+
+模型选择:
+  --model-path PATH   指定模型目录 (默认按优先级自动查找)
+  --quantize MODE     量化模式: auto | none | 4bit | 8bit (默认 auto)
+  --auto-quantize     当 INT4 不存在时, 自动从 FP16 量化 (本地 8GB 推荐)
+
+推理:
+  --instruction TEXT  语言指令 (默认 "walk forward")
+  --max-steps N      最大推理步数 (默认 200)
+  --show-viewer      显示可视化窗口
+
+示例:
+  # 默认: 优先用 INT4 → FP16 → LoRA
+  $0 --robot g1
+
+  # 8GB 显卡: 自动本地量化
+  $0 --robot g1 --auto-quantize
+
+  # 24GB+ 显卡: 强制用 FP16 全量
+  $0 --robot g1 --model-path models/g1_gr00t_full_fp16 --quantize none
+
+  # 指定 INT4 模型
+  $0 --robot g1 --model-path models/g1_gr00t_int4 --quantize 4bit
+EOF
             exit 0
             ;;
         *) fail "未知参数: $1" ;;
@@ -116,6 +141,33 @@ elif [ "$QUANTIZE" = "auto" ]; then
     info "自动检测: 全精度模型"
 fi
 
+# ── 自动本地量化 (--auto-quantize) ─────────────────────────────────────────
+# 场景: 本地只有 FP16 全量 (8GB 显存), 想用 INT4 推理
+# 做法: 调用 05_local_quantize.sh 把 FP16 → INT4, 然后用 INT4 推理
+if $AUTO_QUANTIZE && [ "$QUANTIZE" != "4bit" ]; then
+    FP16_DIR="$PROJECT_ROOT/models/${ROBOT}_gr00t_full_fp16"
+    INT4_DIR="$PROJECT_ROOT/models/${ROBOT}_gr00t_int4"
+
+    # 如果 INT4 已存在, 直接用
+    if [ -d "$INT4_DIR" ] && [ "$(ls -A "$INT4_DIR" 2>/dev/null)" ]; then
+        info "检测到已存在的 INT4 模型, 直接使用"
+        MODEL_PATH="$INT4_DIR"
+        QUANTIZE="4bit"
+    # 否则从 FP16 自动量化
+    elif [ -d "$FP16_DIR" ] && [ "$(ls -A "$FP16_DIR" 2>/dev/null)" ]; then
+        step "本地 FP16 → INT4 自动量化 (8GB 显卡友好)..."
+        bash "$PROJECT_ROOT/scripts/05_local_quantize.sh" \
+            --robot "$ROBOT" \
+            --input "$FP16_DIR" \
+            --output "$INT4_DIR" \
+            --offline
+        MODEL_PATH="$INT4_DIR"
+        QUANTIZE="4bit"
+    else
+        fail "--auto-quantize 需要本地有 FP16 全量模型: $FP16_DIR"
+    fi
+fi
+
 # ── 运行推理 ────────────────────────────────────────────────────────────────
 step "启动推理..."
 
@@ -142,5 +194,4 @@ echo ""
 echo "下一步建议:"
 echo "  1. 调整 --instruction 测试不同任务"
 echo "  2. 收集更多 episodes 重新训练 (--episodes 500+)"
-echo "  3. 部署到真实机器人 (需要 cyclonedds + unitree_sdk2)"
 echo ""

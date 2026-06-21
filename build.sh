@@ -16,7 +16,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DOCKER_DIR="$SCRIPT_DIR/docker"
 # 构建上下文根: unitree/  (gr00t_mjlab_autodl 的父目录)
-# 必须包含兄弟仓库: unitree_sdk2_python/, unitree_rl_mjlab/, gr00t_mjlab_autodl/
+# 必须包含兄弟仓库: unitree_rl_mjlab/, gr00t_mjlab_autodl/
 UNITREE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 IMAGE_PREFIX="gr00t-mjlab"

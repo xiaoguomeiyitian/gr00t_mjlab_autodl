@@ -34,6 +34,13 @@ SKIP_VERIFY=false
 INCLUDE_INT4=true          # 默认下载 INT4 量化模型
 INCLUDE_FP16=true          # 默认下载 FP16 全量模型
 
+# 默认行为 (v2 优化版):
+#   - FP16 全量模型: 默认下载 (本地需要用于推理/转换)
+#   - INT4 量化模型: 默认不下载 (本地 8GB 显卡可自行量化, 节省下载量)
+# 用 --with-int4 显式启用 INT4 下载 (旧行为, 兼容老用户)
+INCLUDE_INT4=false
+INCLUDE_FP16=true
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --robot)        ROBOT="$2";          shift 2 ;;
@@ -41,11 +48,35 @@ while [[ $# -gt 0 ]]; do
         --pack-name)    PACK_NAME="$2";      shift 2 ;;
         --local-dir)    LOCAL_MODEL_DIR="$2"; shift 2 ;;
         --skip-verify)  SKIP_VERIFY=true;    shift   ;;
-        --no-int4)      INCLUDE_INT4=false;  shift   ;;
+        # 新行为 (默认): 只下载 FP16, INT4 留待本地量化
+        --with-int4)    INCLUDE_INT4=true;   shift   ;;
+        --no-int4)      INCLUDE_INT4=false;  shift   ;;   # 兼容别名
+        --with-fp16)    INCLUDE_FP16=true;   shift   ;;   # 兼容别名
         --no-fp16)      INCLUDE_FP16=false;  shift   ;;
         -h|--help)
-            echo "用法: $0 <user@host> -p <port> [--robot g1|go2]"
-            echo "      [--no-int4] [--no-fp16]   # 跳过某个模型"
+            cat <<EOF
+用法: $0 <user@host> -p <port> [--robot g1|go2] [选项]
+
+下载选项 (默认只下载 FP16, 本地自行量化):
+  --with-int4      同时下载云端 INT4 量化包 (~1.5GB)
+  --no-int4        不下载 INT4 (默认)
+  --no-fp16        不下载 FP16 全量
+  --with-fp16      下载 FP16 全量 (默认)
+
+其他选项:
+  --skip-verify    下载后跳过验证
+  --local-dir DIR  模型解压目录 (默认: 项目根/models)
+
+示例:
+  # 推荐: 只下载 FP16 (7GB), 本地用 05_local_quantize.sh 转 INT4
+  $0 root@host -p 12345 --robot g1
+
+  # 同时下 FP16 + INT4 (旧行为, 8.5GB)
+  $0 root@host -p 12345 --robot g1 --with-int4
+
+  # 只下 INT4 (假定本地已有 FP16)
+  $0 root@host -p 12345 --robot g1 --no-fp16 --with-int4
+EOF
             exit 0
             ;;
         -*)
@@ -86,6 +117,14 @@ echo ""
 info "SSH:    $SSH_HOST"
 info "端口:   $SSH_PORT"
 info "机器人: $ROBOT"
+echo ""
+info "下载计划:"
+$INCLUDE_FP16 && echo "  ✓ FP16 全量 (~7GB)  → 默认下载, 本地推理/量化的基础"
+$INCLUDE_FP16 || echo "  ✗ FP16 全量  → 跳过 (--no-fp16)"
+$INCLUDE_INT4  && echo "  ✓ INT4 量化 (~1.5GB) → 云端已量化, 节省本地 GPU 时间"
+$INCLUDE_INT4  || echo "  ✗ INT4 量化  → 跳过 (--with-int4 启用, 或本地 05_local_quantize.sh)"
+echo ""
+$INCLUDE_FP16 && $INCLUDE_INT4 || warn "默认仅下载 FP16. INT4 量化请在本地运行 ./scripts/05_local_quantize.sh"
 echo ""
 
 # ── 测试 SSH ────────────────────────────────────────────────────────────────
@@ -204,16 +243,25 @@ fi
 echo ""
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
-echo -e "${GREEN}🎉 第 3 步完成! 已下载全部模型${NC}"
+echo -e "${GREEN}🎉 第 3 步完成!${NC}"
 echo ""
-echo "模型位置:"
+echo "已下载模型:"
 $INCLUDE_FP16 && [ -d "${EXTRACT_DIR}/${REMOTE_PACK_NAME%.tar.gz}" ] && \
-    echo "  📦 FP16 全量 (高显存 GPU, RTX 4090 24GB+):"
+    echo "  📦 FP16 全量 (~7GB, 高显存 GPU RTX 4090 24GB+):"
     echo "     ${EXTRACT_DIR}/${REMOTE_PACK_NAME%.tar.gz}"
 $INCLUDE_INT4 && [ -d "${EXTRACT_DIR}/${INT4_PACK%.tar.gz}" ] && \
-    echo "  📦 INT4 量化 (低显存 GPU, RTX 2080 8GB):"
+    echo "  📦 INT4 量化 (~1.5GB, 低显存 GPU RTX 2080 8GB):"
     echo "     ${EXTRACT_DIR}/${INT4_PACK%.tar.gz}"
 echo ""
+
+# 智能提示下一步
+if $INCLUDE_FP16 && ! $INCLUDE_INT4; then
+    echo -e "${CYAN}💡 提示:${NC}"
+    echo "  你的本地 GPU 仅 8GB? 可运行本地量化脚本生成 INT4 模型:"
+    echo "    ./scripts/05_local_quantize.sh --robot $ROBOT"
+    echo ""
+fi
+
 echo "进入第 4 步 (本地推理验证):"
 echo "  ./scripts/04_local_verify.sh --robot $ROBOT"
 echo ""

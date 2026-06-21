@@ -46,9 +46,10 @@ gr00t_mjlab_autodl/                # 本项目 (与 unitree_rl_mjlab/ 同级)
 │
 ├── scripts/
 │   ├── 01_local_collect.sh         # [1] 数据采集: 本地 mjlab 收集 + 打包
-│   ├── 02_autodl_train.sh          # [2] 云端训练: AutoDL LoRA + FP16 + INT4
-│   ├── 03_download_model.sh        # [3] 模型下载: SCP 下载双模型
-│   └── 04_local_verify.sh          # [4] 本地推理: 验证推理输出
+│   ├── 02_autodl_train.sh          # [2] 云端训练: AutoDL LoRA + FP16 (默认) + INT4
+│   ├── 03_download_model.sh        # [3] 模型下载: SCP 下载 (默认仅 FP16)
+│   ├── 04_local_verify.sh          # [4] 本地推理: 验证推理输出 (支持 --auto-quantize)
+│   └── 05_local_quantize.sh        # [5] 本地量化 (可选): FP16 → INT4 (PTQ, 8GB 显存友好)
 │
 ├── src/                            # 核心 Python 代码
 │   ├── __init__.py
@@ -229,7 +230,6 @@ cd gr00t_mjlab_autodl/
 **符合 AutoDL 镜像发布要求**: 所有 Git 仓库都位于 `/root/` 下 (含 `.git/`):
 - `/root/gr00t_mjlab_autodl/` — 本项目
 - `/root/unitree_rl_mjlab/` — 官方 mjlab (editable 安装)
-- `/root/unitree_sdk2_python/` — DDS SDK (editable 安装)
 - `/root/Isaac-GR00T/` — GR00T 官方仓库 (train 镜像专属, `uv sync` 安装)
 
 构建阶段自动执行 `git log` + Python 导入验证。
@@ -260,7 +260,7 @@ INSTRUCTION="walk forward" MODEL_PATH=/root/models/g1_gr00t_int4 ./start.sh infe
 
 ## 🎯 模型推理: FP16 全量 vs INT4 量化
 
-云端训练完成后, 默认会**同时生成两个模型包**, 本地一键下载:
+云端训练完成后, 默认会**生成 FP16 全量模型包** (~7GB), INT4 量化在**本地完成**:
 
 | 模型包 | 大小 | 适用场景 | 推理质量 |
 |--------|------|----------|----------|
@@ -268,18 +268,51 @@ INSTRUCTION="walk forward" MODEL_PATH=/root/models/g1_gr00t_int4 ./start.sh infe
 | `{robot}_gr00t_int4_model.tar.gz` | ~1.5GB | **低显存 GPU** (RTX 2080 8GB, RTX 3060 12GB) | ⭐⭐⭐⭐ 良好 |
 
 **Phase 2.5** (`merge_lora.py`): 将训练后的 LoRA adapter 合并到 GR00T 基础模型, 保存完整 FP16 模型。
-**Phase 3** (`export_int4.py`): 在合并的 FP16 模型基础上做 INT4 量化 (NF4 + double-quant)。
+**Phase 3** (`export_int4.py`): 在合并的 FP16 模型基础上做 INT4 量化 (NF4 + double-quant), **纯后训练量化 (PTQ), 无需重新训练**。
 
-下载脚本默认**两个都下载**:
+### 💡 v2 优化版: 仅下载 FP16, 本地量化 INT4
+
+为了减少云服务器使用时间和下载量, **默认只下载 FP16 全量模型**, 然后在本地 (8GB+ 显存即可) 量化生成 INT4:
+
+| 对比项 | 旧版（云端量化） | v2 优化版（本地量化） |
+|--------|----------------|----------------------|
+| 云端 GPU 时间 | 训练 + 合并 + INT4 量化 + 打包 | 训练 + 合并 + 打包 ⬇️ |
+| 下载量 | 7GB + 1.5GB = 8.5GB | **仅 7GB** ⬇️ |
+| 本地显存要求 | 任意（仅推理） | 8GB+ (量化 + 推理) ⬇️ |
+| 是否需要重新训练 | — | **不需要**（PTQ 纯转换） |
+
+**下载脚本** (默认仅下 FP16):
 ```bash
-# 默认: 同时下载 FP16 全量 + INT4 量化
+# ⭐ 推荐: 只下载 FP16 (7GB), 本地再量化
 ./scripts/03_download_model.sh root@xxx.autodl.com -p 12345 --robot g1
 
-# 只下载 INT4 (节省带宽)
-./scripts/03_download_model.sh root@xxx.autodl.com -p 12345 --robot g1 --no-fp16
+# 旧行为: 同时下载 FP16 + INT4 (8.5GB)
+./scripts/03_download_model.sh root@xxx.autodl.com -p 12345 --robot g1 --with-int4
 
-# 只下载 FP16 全量
-./scripts/03_download_model.sh root@xxx.autodl.com -p 12345 --robot g1 --no-int4
+# 只下载 INT4 (假定本地已有 FP16)
+./scripts/03_download_model.sh root@xxx.autodl.com -p 12345 --robot g1 --no-fp16 --with-int4
+```
+
+**本地量化** (PTQ, 8GB+ 显存, 5-15 分钟):
+```bash
+# 默认: 从 models/g1_gr00t_full_fp16/ → models/g1_gr00t_int4/
+./scripts/05_local_quantize.sh --robot g1
+
+# 离线模式 (避免 HF 在线下载触发限流)
+./scripts/05_local_quantize.sh --robot g1 --offline
+
+# 显式指定路径
+./scripts/05_local_quantize.sh \
+    --input models/g1_gr00t_full_fp16 \
+    --output models/g1_gr00t_int4
+```
+
+**一键全流程优化** (推荐 8GB 显存用户):
+```bash
+./run_all.sh --step all \
+    --skip-int4-remote \    # 云端跳过 INT4 量化, 节省 GPU 时间
+    --auto-quantize \       # 本地自动从 FP16 量化
+    --robot g1
 ```
 
 本地推理时, 验证脚本会自动选择:
@@ -287,12 +320,16 @@ INSTRUCTION="walk forward" MODEL_PATH=/root/models/g1_gr00t_int4 ./start.sh infe
 # 默认: 优先查找 INT4 → FP16 → LoRA (按优先级)
 ./scripts/04_local_verify.sh --robot g1
 
+# ⭐ 8GB 显卡: 自动从 FP16 量化后推理 (无需先手动量化)
+./scripts/04_local_verify.sh --robot g1 --auto-quantize
+
 # 显式指定使用 FP16 全量 (高显存 GPU)
 ./scripts/04_local_verify.sh --robot g1 \
     --model-path models/g1_gr00t_full_fp16 --quantize none
 
 # 显式指定使用 INT4 (低显存 GPU)
 ./scripts/04_local_verify.sh --robot g1 \
+    --model-path models/g1_gr00t_int4 --quantize 4bit
     --model-path models/g1_gr00t_int4 --quantize 4bit
 ```
 
@@ -433,7 +470,6 @@ export PYTHONPATH=$PYTHONPATH:$PWD/Isaac-GR00T
 |------|------|---------|
 | `/root/gr00t_mjlab_autodl/` | 本项目 (含 `src/`, `scripts/`, `docker/`, `README.md`) | ✅ `.git/` |
 | `/root/unitree_rl_mjlab/` | 官方 mjlab (editable 安装) | ✅ `.git/` |
-| `/root/unitree_sdk2_python/` | DDS SDK (editable 安装) | ✅ `.git/` |
 | `/root/Isaac-GR00T/` | train 镜像专属 (clone + `uv sync`) | ✅ `.git/` |
 
 构建阶段自动执行 `git log` + Python 导入验证 (`AUTODL_BASE_OK`)。
@@ -446,6 +482,24 @@ docker run --rm gr00t-mjlab-base:latest bash -c \
 ```
 
 构建时使用 `.dockerignore` (位于 `unitree/`) 排除 `data/`, `models/`, `__pycache__/`, `.venv/` 等,但保留 `.git/`。
+
+### Q6: INT4 量化需要重新训练吗？
+
+**不需要**。GR00T 项目用的是 **Post-Training Quantization (PTQ)**, 只是把 FP16 权重转换为 INT4 表示, 没有反向传播, **纯转换操作**:
+
+```python
+# 伪代码: 量化前后权重等价, 仅存储格式不同
+fp16_weights = load_model()            # 加载训练好的 FP16 模型 (7GB)
+int4_weights = quantize_to_int4(fp16_weights)  # 仅转换 (输出 1.5GB)
+save(int4_weights)
+```
+
+**本地 8GB 显存可以完成 INT4 量化**:
+- 量化峰值显存 ~2-3GB (GR00T-N1.7-3B)
+- 耗时 5-15 分钟
+- 量化后模型正好适合 8GB 显存推理
+
+详见上文 [🎯 模型推理: FP16 全量 vs INT4 量化](#-模型推理-fp16-全量-vs-int4-量化) 的 v2 优化版说明。
 
 ---
 
