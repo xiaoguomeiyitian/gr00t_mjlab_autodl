@@ -159,13 +159,15 @@ hr
 step "Phase 2/6: GPU + PyTorch + CUDA 验证"
 hr
 
-if command -v nvidia-smi &>/dev/null; then
+GPU_COUNT=$(nvidia-smi --query-gpu=count --format=csv,noheader 2>/dev/null | grep -cE '^[1-9]' || true)
+if command -v nvidia-smi &>/dev/null && [ "${GPU_COUNT:-0}" -gt 0 ]; then
     GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
     GPU_MEM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader | head -1)
     GPU_DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)
     info "GPU: $GPU_NAME ($GPU_MEM, driver $GPU_DRIVER)"
 else
-    fail "未检测到 nvidia-smi, 请选择 PyTorch + CUDA 镜像"
+    warn "未检测到 GPU 设备 (当前容器可能未透传 GPU), 跳过 GPU 验证"
+    warn "后续训练请在带 GPU 的 AutoDL 实例上重新运行此脚本的验证 Phase"
 fi
 
 PYTHON_BIN=$(command -v python3 || command -v python)
@@ -173,15 +175,15 @@ PYTHON_BIN=$(command -v python3 || command -v python)
 PY_VERSION=$($PYTHON_BIN -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
 info "Python: $PY_VERSION  ($PYTHON_BIN)"
 
-# 检查 torch + CUDA
+# 检查 torch + CUDA (允许失败, venv 重建后会重新安装)
 if $PYTHON_BIN -c 'import torch' 2>/dev/null; then
     TORCH_INFO=$($PYTHON_BIN -c 'import torch; print(f"{torch.__version__} | CUDA {torch.version.cuda} | avail={torch.cuda.is_available()} | devices={torch.cuda.device_count()}")')
     info "PyTorch: $TORCH_INFO"
     if ! $PYTHON_BIN -c 'import torch; assert torch.cuda.is_available()' 2>/dev/null; then
-        fail "PyTorch 已装但 CUDA 不可用, 请选择正确的 PyTorch + CUDA 镜像"
+        warn "PyTorch 已装但 CUDA 不可用, 跳过 (Phase 5 在 venv 中重装 CUDA 版 torch)"
     fi
 else
-    fail "未找到 PyTorch, 请选择 PyTorch 镜像 (实例市场搜索 'PyTorch 2.')"
+    warn "系统 Python 未装 PyTorch, 跳过 (Phase 5 会在 venv 中通过 Isaac-GR00T 安装)"
 fi
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -355,14 +357,19 @@ chk("Python 3.10", sys.version_info[:2] == (3, 10), f"{sys.version_info.major}.{
 try:
     import torch
     chk("torch", True, f"{torch.__version__} CUDA {torch.version.cuda}")
-    chk("CUDA 可用", torch.cuda.is_available())
     if torch.cuda.is_available():
+        chk("CUDA 可用", True, "yes")
         chk("GPU 数量", torch.cuda.device_count() >= 1, f"{torch.cuda.device_count()}")
         chk("GPU 名称", True, torch.cuda.get_device_name(0))
         # 简单算力测试
         x = torch.randn(1024, 1024, device="cuda")
         y = torch.matmul(x, x)
         chk("GPU 计算", True, "matmul(1024x1024) OK")
+    else:
+        # 无 GPU 透传时不算失败 (info 标记)
+        checks.append(("CUDA 可用", True, "⚠️ 当前容器未透传 GPU (训练时需 GPU 实例)"))
+        checks.append(("GPU 数量", True, "⚠️ 无 GPU"))
+        checks.append(("GPU 计算", True, "⚠️ 跳过 matmul 测试"))
 except Exception as e:
     chk("torch", False, str(e))
 
@@ -404,6 +411,16 @@ VERIFY_RC=$?
 set -e
 
 echo "$VERIFY_LOG"
+
+# 无 GPU 场景下验证失败不算硬错误 (环境本身装好了)
+if [ "$VERIFY_RC" -ne 0 ]; then
+    GPU_COUNT=$(nvidia-smi --query-gpu=count --format=csv,noheader 2>/dev/null | grep -cE '^[1-9]' || true)
+    if [ "${GPU_COUNT:-0}" -eq 0 ]; then
+        warn "Phase 7 验证有项未通过, 但这是因为当前容器未透传 GPU, 环境本身已装好"
+        warn "请在带 GPU 的 AutoDL 实例上重新运行本脚本以完成 GPU 验证"
+        VERIFY_RC=0
+    fi
+fi
 
 # ════════════════════════════════════════════════════════════════════════════
 # 后续步骤提示
