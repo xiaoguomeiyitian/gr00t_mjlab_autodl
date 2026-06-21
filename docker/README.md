@@ -88,13 +88,11 @@ INSTRUCTION="walk forward" MODEL_PATH=/root/models/g1_gr00t_int4 ./start.sh infe
 
 ```
 /root/
-├── gr00t_mjlab_autodl/          # 本项目 (含 .git/)
-├── unitree_rl_mjlab/             # 官方 mjlab (含 .git/, editable)
+├── gr00t_mjlab_autodl/          # 本项目 (host mount 注入)
+├── unitree_rl_mjlab/             # 官方 mjlab (editable install, 容器内 bake)
 ├── data/                         # 训练数据 (与宿主机双向同步)
 └── models/                       # 模型权重 (与宿主机双向同步)
 ```
-
-> AutoDL 镜像发布要求 `/root/` 下是 Git 仓库, 本项目 + mjlab 都满足。
 
 ---
 

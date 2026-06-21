@@ -2,7 +2,7 @@
 # gr00t-mjlab 推理验证镜像
 # base + 模型加载 (transformers/peft/bnb)
 # 无 Isaac-GR00T 完整包, 无训练栈 (accelerate/datasets)
-# 注: 训练在 AutoDL 云端, 不在本地 Docker
+# 注: 训练在云端进行, 本地 Docker 只做采集和推理
 # ============================================================================
 FROM gr00t-mjlab-base:latest
 

@@ -5,7 +5,7 @@
 # 完整 6 步流程 (与 ./scripts/0N_*.sh 一一对应):
 #   [1] 数据采集   → 启动 collect 镜像, 执行 01_local_collect.sh
 #   [2] 上传云端   → 主机 shell, 执行 02_upload_to_autodl.sh
-#   [3] 云端训练   → 提示用户 SSH 到 AutoDL 执行 03_autodl_train.sh
+#   [3] 云端训练   → 提示用户 SSH 到云端执行 03_autodl_train.sh
 #   [4] 下载模型   → 主机 shell, 执行 04_download_model.sh
 #   [5] 本地量化   → 主机 shell, 执行 05_local_quantize.sh
 #   [6] 推理验证   → 启动 infer 镜像, 执行 06_local_verify.sh

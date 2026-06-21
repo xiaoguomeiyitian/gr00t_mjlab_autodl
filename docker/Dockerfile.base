@@ -2,7 +2,7 @@
 # gr00t-mjlab 公共基础镜像 (Base)
 # 包含: CUDA + Python 3.12 + mjlab + gr00t 脚本
 # 两个变体 (collect / infer) 都基于此基础
-# 注: 训练在 AutoDL 云端, 不在本地 Docker
+# 注: 训练在云端进行, 本地 Docker 只做采集和推理
 # ============================================================================
 FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 
@@ -113,11 +113,8 @@ RUN cd /root/unitree_rl_mjlab \
 RUN pip install --no-cache-dir \
         "scipy>=1.11.0"
 
-# ── 2. gr00t_mjlab_autodl 源码 (含 .git/, 符合 AutoDL 镜像发布要求) ────────
-#   AutoDL 要求: /root/ 下必须是 Git 代码仓库, 能执行仓库中的简单代码
-COPY gr00t_mjlab_autodl/ /root/gr00t_mjlab_autodl/
-
-# 采集 + 转换所需的小型数据依赖
+# ── 2. 采集 + 转换所需的小型数据依赖 (项目源码由运行时 mount 注入) ────────
+#   注: gr00t_mjlab_autodl/ 目录不在 build 期 COPY, 而是由 start.sh -v 注入
 RUN pip install --no-cache-dir \
         pandas>=2.0.0 \
         pyarrow>=14.0.0 \
@@ -130,15 +127,6 @@ RUN chmod +x /usr/local/bin/*.sh
 
 # ── 5. 运行时目录 ──────────────────────────────────────────────────────────
 RUN mkdir -p /root/data /root/models
-
-# ── 6. AutoDL 镜像合规验证 (进入仓库 + 简单代码执行) ─────────────────────
-#   验证要求: 能在 /root/gr00t_mjlab_autodl/ 下执行 Python 代码
-#   注意: 不在此处做 git 验证 (容器内无 host 端 git 历史, git log 会失败)
-#   项目布局: configs/ 在 src/ 下, src/ 才是 Python 包根
-#   不引用 mjlab.__version__ (mjlab 包没有该属性), 用 importlib.metadata 获取版本
-RUN cd /root/gr00t_mjlab_autodl && \
-    echo "--- 验证 Python 代码可执行 (AutoDL 合规) ---" && \
-    python3 -c "import sys; sys.path.insert(0, 'src'); from importlib.metadata import version; import mjlab; import configs.g1_config as g1c; import configs.go2_config as go2c; print(f'mjlab={version(\"mjlab\")}, g1_joints={g1c.G1_NUM_JOINTS}, go2_joints={go2c.GO2_NUM_JOINTS}'); print('AUTODL_BASE_OK')"
 
 WORKDIR ${GR00T_MJLAB_ROOT}
 

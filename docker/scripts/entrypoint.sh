@@ -7,8 +7,8 @@
 #   entrypoint.sh shell              # 进入交互 shell
 #   entrypoint.sh python [args...]   # 直接运行 python
 #
-# 注: 训练不在本地 Docker 中进行, 在 AutoDL 云端跑
-#     (见 ./scripts/02_upload_to_autodl.sh + ./scripts/03_autodl_train.sh)
+# 注: 训练不在本地 Docker 中进行, 在云端跑
+#     (见 ./scripts/02_upload_to_autodl.sh + ./scripts/03_autodl_train.sh, 文件名保留以兼容现有流程)
 # ============================================================================
 set -euo pipefail
 
