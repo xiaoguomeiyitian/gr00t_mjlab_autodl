@@ -62,7 +62,7 @@ gr00t_mjlab_autodl/                # 本项目 (与 unitree_rl_mjlab/ 同级)
 ├── .gitignore
 │
 ├── start.sh                        # 🎯 统一入口 (交互式 / 选择步骤 1-6)
-├── build.sh                        # 🐳 Docker 镜像构建 (交互式 / 命令行)
+├── install_native.sh               # 🛠 本机环境一键安装 (Python + PyTorch + mjlab + GR00T)
 │
 ├── scripts/
 │   ├── _ssh_config.sh             # ⚙️ SSH 配置 (host/port/key) — 上传/下载共用
@@ -74,28 +74,16 @@ gr00t_mjlab_autodl/                # 本项目 (与 unitree_rl_mjlab/ 同级)
 │   ├── 05_local_quantize.sh        # [5] 本地量化 (可选): BF16 → INT4 (PTQ, 8GB 友好)
 │   └── 06_local_verify.sh          # [6] 本地推理: 验证推理输出 (支持 --auto-quantize)
 │
-├── src/                            # 核心 Python 代码
-│   ├── __init__.py
-│   ├── collect_data.py             # 数据收集器 (基于 unitree_rl_mjlab)
-│   ├── convert_to_lerobot.py       # npz → LeRobot v2 格式
-│   ├── export_int4.py              # INT4 量化导出 (PTQ, 约 7GB → 1.5GB)
-│   ├── infer.py                    # 本地推理包装器 (mjlab + GR00T)
-│   └── configs/
-│       ├── __init__.py
-│       ├── g1_config.py            # G1 配置 (29 joints, HOME_KEYFRAME)
-│       └── go2_config.py           # Go2 配置 (12 joints, INIT_STATE)
-│
-└── docker/                         # 🐳 本地双镜像 Docker 方案 (训练在云端)
-    ├── README.md                   # 镜像方案详细说明
-    ├── Dockerfile.base             # 共享基础: CUDA + Python 3.12 + mjlab
-    ├── Dockerfile.collect          # [1] 数据采集镜像
-    ├── Dockerfile.infer            # [6] 推理验证镜像
-    └── scripts/
-        ├── entrypoint.sh           # 统一入口 (mode → 调度)
-        ├── collect.sh              # [1] 调度脚本
-        └── infer.sh                # [6] 调度脚本
-    # 注: build.sh + start.sh 已上移到项目根, 方便日常调用
-    #     训练镜像已移除: 训练在 AutoDL 云端, 用 ./scripts/02_upload_to_autodl.sh
+└── src/                            # 核心 Python 代码
+    ├── __init__.py
+    ├── collect_data.py             # 数据收集器 (基于 unitree_rl_mjlab)
+    ├── convert_to_lerobot.py       # npz → LeRobot v2 格式
+    ├── export_int4.py              # INT4 量化导出 (PTQ, 约 7GB → 1.5GB)
+    ├── infer.py                    # 本地推理包装器 (mjlab + GR00T)
+    └── configs/
+        ├── __init__.py
+        ├── g1_config.py            # G1 配置 (29 joints, HOME_KEYFRAME)
+        └── go2_config.py           # Go2 配置 (12 joints, INIT_STATE)
 
 # 运行时生成 (gitignored):
 data/                              # 数据输出
@@ -183,7 +171,53 @@ source .venv/bin/activate
 
 ---
 
-## 🚀 快速开始
+## 🛠 本机一键安装 (Native 模式)
+
+本项目默认就是**本机模式** — 所有步骤直接在本机 `.venv` / shell / SCP 中执行,
+不需要容器。
+
+### 快速安装
+
+```bash
+cd gr00t_mjlab_autodl/
+
+# 1. 交互式安装 (推荐首次)
+./install_native.sh
+
+# 2. 或非交互式
+./install_native.sh collect              # 只装采集 (约 6GB)
+./install_native.sh infer                # 装采集 + 推理 (约 9GB)
+./install_native.sh --mirror cn all      # 国内阿里云源
+./install_native.sh --no-apt infer       # 跳过 apt, 假定依赖已装
+./install_native.sh --recreate all       # 强制重建 .venv
+
+# 3. 运行步骤
+./start.sh                              # 交互式菜单
+./start.sh 1                            # 采集
+./start.sh 1 --robot g1                 # 采集 G1 数据
+./start.sh 6 --auto-quantize            # 推理 (自动量化)
+
+# 4. 进入 shell (激活 .venv, 可手动调 mjlab / Isaac-GR00T)
+./start.sh shell
+```
+
+### 关键细节
+
+- **Python 版本**: 直接用系统 Python (3.10 / 3.11 / 3.12), mjlab 1.2.0 要求 `>=3.10, <3.14`
+- **venv 位置**: `./.venv` (项目内, 已在 `.gitignore`)
+- **不影响 shell rc**: 用 `source .venv/bin/activate` 手动激活, 或直接 `./start.sh ...`
+- **PyTorch wheel**: `torch==2.11.0+cu128`
+  - 支持 sm_70 (Volta) / sm_75 (Turing, RTX 2080) / sm_80+ (Ampere+) / sm_90 (Hopper) / sm_100/120 (Blackwell)
+- **GPU 自动检测**: 自动检查 `nvidia-smi` 和 compute_cap, 无 GPU 时仍能装但不可用
+- **数据/模型路径**: `data/` `models/` (项目根目录下)
+- **NVIDIA 库路径**: 通过 `LD_LIBRARY_PATH` 动态注入 `.venv/lib/.../nvidia/*/lib`
+- **Isaac-GR00T**: 如果 `../Isaac-GR00T/` 存在, 自动 `editable install` 并注入 `PYTHONPATH`
+- **重装**: `./install_native.sh --recreate all` (删除现有 venv)
+
+---
+
+
+## �🚀 快速开始
 
 ### ⚙️ 一次性配置 SSH (推荐)
 
@@ -206,12 +240,12 @@ REMOTE_DIR="/root/workspace"            # 云端工作目录 (一般不用改)
 
 | 步骤 | 名称 | 运行环境 | 调用的脚本 |
 |------|------|---------|-----------|
-| [1] | 数据采集 | 🐳 Docker (collect 镜像) | `01_local_collect.sh` |
+| [1] | 数据采集 | � 本机 .venv (含 mjlab) | `01_local_collect.sh` |
 | [2] | 上传云端 | 💻 主机 shell | `02_upload_to_autodl.sh` |
 | [3] | 云端训练 | ☁️  AutoDL (本机提示 SSH) | `03_autodl_train.sh` (云端) |
 | [4] | 下载模型 | 💻 主机 shell | `04_download_model.sh` |
 | [5] | 本地量化 | 💻 主机 shell | `05_local_quantize.sh` |
-| [6] | 推理验证 | 🐳 Docker (infer 镜像) | `06_local_verify.sh` |
+| [6] | 推理验证 | 💻 本机 .venv (含 mjlab + GR00T) | `06_local_verify.sh` |
 
 ```bash
 cd gr00t_mjlab_autodl/
@@ -312,46 +346,24 @@ python3 gr00t/experiment/launch_finetune.py \
 
 > **回本地下载模型**: 用 [4] 脚本 `./scripts/04_download_model.sh --robot g1`
 
-### 方式三: 自建 Docker 镜像 (本地双镜像: collect + infer)
-
-> **训练在 AutoDL 云端**, 不构建本地训练镜像。本地 Docker 只承担 [1] 数据采集 和 [6] 推理验证。
-
-| 镜像 | 大小 | 用途 |
-|------|------|------|
-| `gr00t-mjlab-collect:latest` | ~5GB | [1] 数据采集 (mjlab + collect 脚本) |
-| `gr00t-mjlab-infer:latest`   | ~7GB | [6] 推理验证 (transformers + peft + bnb) |
-| `gr00t-mjlab-base:latest`    | ~5GB | 共享基础 (CUDA + mjlab) |
-
-[2] 上传 / [4] 下载是纯 SSH/SCP, **不依赖 Docker**;
-[5] 本地量化是 Python 推理, **可以用主机或 infer 容器内的 Python**。
+### 方式三: 快速参考
 
 ```bash
-# 首次构建 (国内镜像源, ~10-20 分钟)
-./build.sh --mirror cn all
+# 安装 + 采 + 推 (一条龙)
+./install_native.sh infer                # 本机一键装环境
+./start.sh 1 --robot g1                  # 采 G1 数据
+./start.sh 1 --robot g1 --episodes 200   # 采 200 回合
+./start.sh 6 --auto-quantize             # 推理 (自动量化)
 
-# 通过统一入口执行步骤
-./start.sh 1                       # [1] 数据采集 (启动 collect 镜像)
-./start.sh 4                       # [4] 下载模型 (主机 shell, 读 _ssh_config.sh)
-./start.sh 5                       # [5] 本地量化 (主机 shell)
-./start.sh 6                       # [6] 推理验证 (启动 infer 镜像)
+# 采集 G1 + Go2 (多任务)
+for r in g1 go2; do
+    ./start.sh 1 --robot $r --episodes 200
+done
 
-# 旧名兼容 (直接走对应镜像)
-./start.sh collect                 # 等价于 ./start.sh 1
-./start.sh infer                   # 等价于 ./start.sh 6
-./start.sh shell                   # 进入 collect 镜像的 shell
-
-# 训练不在本地 Docker, 用 shell 脚本 + AutoDL
-./start.sh 2                       # [2] 上传 (主机 shell)
-# (云端) ./start.sh 3              # [3] 训练 (提示 SSH 到 AutoDL)
-
-# 环境变量透传 (collect/infer 容器)
+# 环境变量透传 (给底层脚本)
 ROBOT=g1 NUM_EPISODES=200 ./start.sh 1
-INSTRUCTION="walk forward" MODEL_PATH=/root/models/g1_gr00t_int4 ./start.sh 6
+INSTRUCTION="walk forward" MODEL_PATH=./models/g1_gr00t_int4 ./start.sh 6
 ```
-
-> `./build.sh` + `./start.sh` 在项目根目录直接调用, Dockerfile 与调度脚本保留在 `docker/` 子目录便于维护。
-
-详见 [`docker/README.md`](docker/README.md)。
 
 ---
 
@@ -614,7 +626,7 @@ data/g1_lerobot/
 
 | 项目 | 最低 | 推荐 | 备注 |
 |------|------|------|------|
-| 系统盘 | 30 GB | 50 GB | Ubuntu + Docker + PyTorch + GR00T 仓库 |
+| 系统盘 | 30 GB | 50 GB | Ubuntu + PyTorch + GR00T 仓库 |
 | 数据盘 | 100 GB | 500 GB+ | 数据集 (~50 episodes ≈ 50-100 GB) + checkpoint (~25 GB) + INT4 (~1.5 GB) |
 | 网络存储 | — | NFS/S3 | 生产环境 (官方推荐) |
 
@@ -687,30 +699,7 @@ git clone https://github.com/NVIDIA/Isaac-GR00T.git
 export PYTHONPATH=$PYTHONPATH:$PWD/Isaac-GR00T
 ```
 
-### Q5: 镜像是否符合 AutoDL 发布要求?
-
-**是**。`gr00t-mjlab-*` 本地双镜像均满足 AutoDL 镜像发布审核标准:
-> 审核标准: 在 `/root` 目录下包含相应 Git 代码仓库, 且可以成功执行 Git 代码仓库中的简单代码
-
-| 位置 | 内容 | Git 仓库 |
-|------|------|---------|
-| `/root/gr00t_mjlab_autodl/` | 本项目 (含 `src/`, `scripts/`, `docker/`, `README.md`) | ✅ `.git/` |
-| `/root/unitree_rl_mjlab/` | 官方 mjlab (editable 安装) | ✅ `.git/` |
-
-> 训练不在本地 Docker 中, 训练环境 (Isaac-GR00T) 在 AutoDL 云端按需构建, 详见 `scripts/00_autodl_init.sh`。
-
-构建阶段自动执行 `git log` + Python 导入验证 (`AUTODL_BASE_OK`)。
-
-任何镜像内可直接:
-```bash
-docker run --rm gr00t-mjlab-base:latest bash -c \
-    "cd /root/gr00t_mjlab_autodl && git log --oneline -3 && \
-     python3 -c 'import mjlab; print(mjlab.__version__)'"
-```
-
-构建时使用 `.dockerignore` (位于 `unitree/`) 排除 `data/`, `models/`, `__pycache__/`, `.venv/` 等,但保留 `.git/`。
-
-### Q6: INT4 量化需要重新训练吗？
+### Q5: INT4 量化需要重新训练吗？
 
 **不需要**。GR00T 项目用的是 **Post-Training Quantization (PTQ)**, 只是把 BF16 权重转换为 INT4 表示, 没有反向传播, **纯转换操作**:
 

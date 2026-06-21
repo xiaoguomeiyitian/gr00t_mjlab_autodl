@@ -249,9 +249,28 @@ def convert(
         actions = data.get("actions")
         rewards = data.get("rewards")
         ep_instruction_arr = data.get("instruction")
-        if ep_instruction_arr is not None and len(ep_instruction_arr) > 0:
-            ep_instruction = str(ep_instruction_arr[0])
+        # instruction 可能是: 0-d 数组 / 1-d 数组 / Python str / numpy 标量
+        # 用 .size (或 len) 都得先把它转成可定长判断的形态
+        if ep_instruction_arr is None:
+            ep_instruction = None
+        elif isinstance(ep_instruction_arr, str):
+            ep_instruction = ep_instruction_arr if ep_instruction_arr else None
         else:
+            # 尝试用 numpy 通用接口, 避免 0-d 数组触发 len() 报错
+            try:
+                arr = np.asarray(ep_instruction_arr)
+                if arr.size == 0:
+                    ep_instruction = None
+                else:
+                    # 0-d 数组 → 标量; 1-d → 取第一个
+                    if arr.ndim == 0:
+                        ep_instruction = str(arr.item())
+                    else:
+                        ep_instruction = str(arr.flatten()[0])
+            except Exception:
+                ep_instruction = str(ep_instruction_arr)
+
+        if not ep_instruction:
             ep_instruction = metadata.get("instruction", "walk forward")
 
         # 注册 task
@@ -316,8 +335,12 @@ def convert(
                         record[k] = v
 
             # ── action.* 字段 (按 action_mode) ────────────────────
+            # 注意: 不能用 `or` 串联 act.get(), 否则 numpy 数组会触发
+            #       "The truth value of an array with more than one element is ambiguous"
             if action_mode == "absolute":
-                v = act.get("action.joint_position_target") or act.get("target_joint_pos")
+                v = act.get("action.joint_position_target")
+                if v is None:
+                    v = act.get("target_joint_pos")
                 if v is not None and isinstance(v, np.ndarray):
                     record["action.joint_position_target"] = v.tolist()
             elif action_mode == "delta":

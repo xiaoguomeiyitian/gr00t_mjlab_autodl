@@ -35,6 +35,16 @@ warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
 step()  { echo -e "${BLUE}[→]${NC} $1"; }
 fail()  { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 
+# ── 自动检测 venv (native 模式) ────────────────────────────────────────────
+VENV_DIR="$PROJECT_ROOT/.venv"
+if [ -x "$VENV_DIR/bin/python" ] && ! python3 -c "import transformers" 2>/dev/null; then
+    if "$VENV_DIR/bin/python" -c "import transformers" 2>/dev/null; then
+        export PATH="$VENV_DIR/bin:$PATH"
+        export VIRTUAL_ENV="$VENV_DIR"
+        info "已激活本地 venv: $VENV_DIR"
+    fi
+fi
+
 # ── 参数 ──────────────────────────────────────────────────────────────
 ROBOT="g1"
 INPUT_DIR=""

@@ -224,8 +224,58 @@ TASK_TO_ROBOT: dict[str, str] = {
 }
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 数据收集
+# ──────────────────────────────────────────────────────────────────────────────# Viser 浏览器 viewer (可选, 用于远程监控数据采集进度)
+# ──────────────────────────────────────────────────────────────────────────
+
+class ViserViewer:
+    """在浏览器中实时显示数据采集进度 (依赖 viser 库).
+
+    提供:
+      - Episode / Step 进度
+      - 当前指令
+      - Base linear velocity 实时数值
+      - 关节目标范围
+
+    启动后打印 URL (如 http://localhost:8080), 浏览器打开即可.
+    默认关闭 (--viser 启用).
+    """
+
+    def __init__(self, port: int = 8080):
+        import viser  # 延迟导入 (viser 是可选依赖)
+        self.server = viser.ViserServer(host="0.0.0.0", port=port)
+        self.url = f"http://localhost:{port}"
+
+        with self.server.gui.add_folder("📊 进度"):
+            self.ep_text = self.server.gui.add_text("Episode", initial_value="-/-", disabled=True)
+            self.step_text = self.server.gui.add_text("Step", initial_value="-/-", disabled=True)
+            self.instr_text = self.server.gui.add_text("指令", initial_value="(初始化中...)", disabled=True)
+
+        with self.server.gui.add_folder("🤖 状态"):
+            self.base_vel_text = self.server.gui.add_text("Base vel (m/s)", initial_value="-", disabled=True)
+            self.action_text = self.server.gui.add_text("关节目标范围", initial_value="-", disabled=True)
+
+        logger.info("🌐 viser viewer 已启动: %s (浏览器打开此 URL)", self.url)
+
+    def update(self, ep: int, total_ep: int, step: int, total_step: int,
+               instruction: str, base_vel=None, joint_targets=None) -> None:
+        self.ep_text.value = f"{ep+1}/{total_ep}"
+        self.step_text.value = f"{step}/{total_step}"
+        self.instr_text.value = instruction
+        if base_vel is not None and len(base_vel) >= 3:
+            vx, vy, vz = float(base_vel[0]), float(base_vel[1]), float(base_vel[2])
+            self.base_vel_text.value = f"({vx:+.2f}, {vy:+.2f}, {vz:+.2f})"
+        if joint_targets is not None and len(joint_targets) > 0:
+            jt = np.asarray(joint_targets)
+            self.action_text.value = f"[{jt.min():.2f}, {jt.max():.2f}]"
+
+    def close(self) -> None:
+        try:
+            self.server.stop()
+        except Exception:
+            pass
+
+
+# ──────────────────────────────────────────────────────────────────────────# 数据收集
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -247,8 +297,11 @@ def collect_demonstrations(
     enable_video: bool = False,
     video_height: int = 224,
     video_width: int = 224,
+    video_fps: int = 0,  # 0 = auto (根据 dt 算), >0 = 显式 fps (GR00T 推荐 30)
     camera_name: str | None = None,
     instruction_pool: list[str] | None = None,
+    viser: bool = False,  # 在浏览器里看数据采集进度 (默认关, 需 pip install viser)
+    viser_port: int = 8080,
 ) -> str:
     """在 unitree_rl_mjlab 仿真环境中收集机器人演示数据。
 
@@ -279,6 +332,8 @@ def collect_demonstrations(
             - "relative_eef": 末端位姿增量 (G1 操作任务)
         enable_video: 是否采集 RGB 视频 (mjlab offscreen render)
         video_height / video_width: 视频分辨率 (默认 224x224 匹配 GR00T)
+        video_fps: 视频帧率 (默认 0 = 根据仿真 dt 自动算, 通常 30~50fps;
+                            设为 30 等可显式控制, GR00T 训练推荐 30)
         camera_name: mjlab camera name (None = 用 unitree_rl_mjlab 默认 front_view)
         instruction_pool: 备选指令列表 (每 episode 随机抽一个, 增加数据多样性)
 
@@ -339,7 +394,8 @@ def collect_demonstrations(
     logger.info("  Action mode: %s", action_mode)
     logger.info("  Video: %s (cam=%s, %dx%d @ %dfps)",
                  enable_video, camera_name or "default",
-                 video_height, video_width, int(round(1.0 / dt)))
+                 video_height, video_width,
+                 video_fps if video_fps > 0 else int(round(1.0 / dt)))
     logger.info("  设备: %s", device)
     logger.info("  输出: %s", output_dir)
     logger.info("=" * 60)
@@ -385,6 +441,14 @@ def collect_demonstrations(
         logger.info("✅ mjlab 环境创建成功 (device=%s, render=%s)",
                     device, render_mode or "off")
         use_mjlab = True
+
+        # ─── viser 浏览器 viewer (可选, --viser 启用) ───────────
+        viewer = None
+        if viser:
+            try:
+                viewer = ViserViewer(port=viser_port)
+            except ImportError:
+                logger.warning("viser 未安装, 跳过浏览器 viewer (pip install viser)")
 
         # ─── 如果是 trained 模式, 加载 PPO 策略 ───
         if agent == "trained":
@@ -584,6 +648,20 @@ def collect_demonstrations(
                 if frame is not None:
                     frames.append(frame)
 
+            # ─── 5.5) viser 浏览器 viewer 更新 (可选) ─────────────
+            if viewer is not None and (step_idx % 5 == 0 or step_idx == episode_length - 1):
+                try:
+                    viewer.update(
+                        ep=ep, total_ep=num_episodes,
+                        step=step_idx + 1, total_step=episode_length,
+                        instruction=ep_instruction,
+                        base_vel=base_lin_vel,
+                        joint_targets=joint_targets,
+                    )
+                except Exception as e:
+                    if step_idx == 0:
+                        logger.debug("viser viewer 更新失败: %s", e)
+
             # ─── 6) 记录 ───────────────────────────────────────────
             observations.append({
                 "state.joint_pos": joint_pos.astype(np.float32),
@@ -618,7 +696,8 @@ def collect_demonstrations(
             vid_path = output_path / f"episode_{ep:06d}.mp4"
             if imageio is not None:
                 try:
-                    imageio.mimsave(str(vid_path), frames, fps=int(round(1.0 / dt)))
+                    imageio.mimsave(str(vid_path), frames,
+                                     fps=video_fps if video_fps > 0 else int(round(1.0 / dt)))
                 except Exception as e:
                     logger.warning("mp4 编码失败, 改存 frames.npz: %s", e)
                     np.savez_compressed(output_path / f"episode_{ep:06d}_frames.npz",
@@ -639,6 +718,13 @@ def collect_demonstrations(
         except Exception:
             pass
 
+    # 关闭 viser viewer
+    if viewer is not None:
+        try:
+            viewer.close()
+        except Exception:
+            pass
+
     # ── 7. 保存元数据 ─────────────────────────────────────────────────
     metadata = {
         "robot": robot.upper(),
@@ -651,7 +737,7 @@ def collect_demonstrations(
         "checkpoint": checkpoint,
         "action_mode": action_mode,
         "enable_video": enable_video,
-        "video_fps": int(round(1.0 / dt)) if enable_video else 0,
+        "video_fps": (video_fps if video_fps > 0 else int(round(1.0 / dt))) if enable_video else 0,
         "video_height": video_height if enable_video else 0,
         "video_width": video_width if enable_video else 0,
         "video_key": video_key if enable_video else None,
@@ -884,8 +970,16 @@ def main():
                         help="视频高度 (default: 224, GR00T 推荐)")
     parser.add_argument("--video-width", type=int, default=224,
                         help="视频宽度 (default: 224)")
+    parser.add_argument("--video-fps", type=int, default=0,
+                        help="视频帧率 (default: 0 = auto 根据仿真 dt 算; "
+                             "GR00T 训练推荐 30)")
     parser.add_argument("--camera-name", type=str, default=None,
                         help="mjlab camera name (None=默认 front_view)")
+    parser.add_argument("--viser", action="store_true",
+                        help="启用 viser 浏览器可视化 (显示 episode 进度 / 步数 / "
+                             "指令 / base velocity; 需 pip install viser)")
+    parser.add_argument("--viser-port", type=int, default=8080,
+                        help="viser 服务器端口 (default: 8080)")
     args = parser.parse_args()
 
     if args.output_dir is None:
@@ -916,7 +1010,10 @@ def main():
         enable_video=args.video,
         video_height=args.video_height,
         video_width=args.video_width,
+        video_fps=args.video_fps,
         camera_name=args.camera_name,
+        viser=args.viser,
+        viser_port=args.viser_port,
     )
 
 

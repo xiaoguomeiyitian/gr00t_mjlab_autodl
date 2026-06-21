@@ -28,6 +28,18 @@ warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
 step()  { echo -e "${BLUE}[→]${NC} $1"; }
 fail()  { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 
+# ── 自动检测 venv (native 模式) ────────────────────────────────────────────
+#   逻辑: 如果系统 python3 找不到 mjlab, 但 .venv 里有, 就把 .venv 加到 PATH 前
+#   幂等: 任何情况下 (系统有 mjlab 或 venv 有 mjlab) 都能正确处理
+VENV_DIR="$PROJECT_ROOT/.venv"
+if [ -x "$VENV_DIR/bin/python" ] && ! python3 -c "import mjlab" 2>/dev/null; then
+    if "$VENV_DIR/bin/python" -c "import mjlab" 2>/dev/null; then
+        export PATH="$VENV_DIR/bin:$PATH"
+        export VIRTUAL_ENV="$VENV_DIR"
+        info "已激活本地 venv: $VENV_DIR"
+    fi
+fi
+
 # ── 参数 ────────────────────────────────────────────────────────────────────
 ROBOT="g1"
 TASK="Unitree-G1-Flat"
@@ -43,6 +55,8 @@ VIDEO_HEIGHT=224
 VIDEO_WIDTH=224
 VIDEO_FPS=30
 CHECKPOINT=""               # --agent trained 时必填
+ENABLE_VISER=false          # 启用 viser 浏览器 viewer (默认关)
+VISER_PORT=8080
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -61,6 +75,8 @@ while [[ $# -gt 0 ]]; do
         --video-width)  VIDEO_WIDTH="$2";    shift 2 ;;
         --video-fps)    VIDEO_FPS="$2";      shift 2 ;;
         --checkpoint)   CHECKPOINT="$2";     shift 2 ;;
+        --viser)        ENABLE_VISER=true;   shift   ;;
+        --viser-port)   VISER_PORT="$2";     shift 2 ;;
         -h|--help)
             echo "用法: $0 [选项]"
             echo ""
@@ -86,6 +102,10 @@ while [[ $# -gt 0 ]]; do
             echo "  --video-height H        默认 224 (GR00T 期望)"
             echo "  --video-width W         默认 224"
             echo "  --video-fps N           默认 30"
+            echo ""
+            echo "浏览器 viewer (可选, 需 pip install viser):"
+            echo "  --viser                 启动 viser 浏览器 viewer (显示 episode / 步数 / 指令 / base vel)"
+            echo "  --viser-port N          端口 (默认 8080)"
             exit 0
             ;;
         *) fail "未知参数: $1" ;;
@@ -139,6 +159,24 @@ if ! python3 -c "import mjlab" 2>/dev/null; then
 fi
 info "unitree_rl_mjlab: OK"
 
+# ── 检查输出目录可写 (避免 PermissionError) ─────────────────────────────
+#   历史教训: data/ 目录可能由之前的 root 进程 (如安装系统包) 创建, 普通用户无法写入
+step "检查输出目录可写性..."
+for d in "$PROJECT_ROOT/data" "$PROJECT_ROOT/models"; do
+    if [ -d "$d" ]; then
+        if ! touch "$d/.write_test" 2>/dev/null; then
+            OWNER=$(stat -c '%U:%G' "$d")
+            CUR_USER=$(whoami)
+            warn "目录不可写: $d (owner=$OWNER, 当前用户=$CUR_USER)"
+            warn "通常是因为早期以 root 身份执行了某个进程留下的目录"
+            warn "修复: sudo chown -R $CUR_USER:$CUR_USER $d"
+            fail "权限不足, 请运行上面的 chown 命令后重试"
+        fi
+        rm -f "$d/.write_test"
+    fi
+done
+info "输出目录可写 ✅"
+
 # ════════════════════════════════════════════════════════════════════════════
 # Step 1: 收集数据
 # ════════════════════════════════════════════════════════════════════════════
@@ -165,6 +203,9 @@ if [ "$ENABLE_VIDEO" = true ]; then
 fi
 if [ -n "$CHECKPOINT" ]; then
     COLLECT_ARGS+=(--checkpoint "$CHECKPOINT")
+fi
+if [ "$ENABLE_VISER" = true ]; then
+    COLLECT_ARGS+=(--viser --viser-port "$VISER_PORT")
 fi
 
 python3 "$SRC_DIR/collect_data.py" "${COLLECT_ARGS[@]}"
