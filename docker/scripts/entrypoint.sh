@@ -3,10 +3,12 @@
 # gr00t-mjlab 容器统一入口
 # 用法:
 #   entrypoint.sh collect [args...]   # 数据采集模式
-#   entrypoint.sh train   [args...]   # 训练模式 (GR00T)
-#   entrypoint.sh infer   [args...]   # 推理模式
+#   entrypoint.sh infer   [args...]   # 推理验证模式
 #   entrypoint.sh shell              # 进入交互 shell
 #   entrypoint.sh python [args...]   # 直接运行 python
+#
+# 注: 训练不在本地 Docker 中进行, 在 AutoDL 云端跑
+#     (见 ./scripts/02_upload_to_autodl.sh + ./scripts/03_autodl_train.sh)
 # ============================================================================
 set -euo pipefail
 
@@ -16,9 +18,6 @@ shift || true
 case "$MODE" in
     collect)
         exec /usr/local/bin/collect.sh "$@"
-        ;;
-    train)
-        exec /usr/local/bin/train.sh "$@"
         ;;
     infer)
         exec /usr/local/bin/infer.sh "$@"

@@ -1,7 +1,8 @@
 # ============================================================================
 # gr00t-mjlab 推理验证镜像
 # base + 模型加载 (transformers/peft/bnb)
-# 比 train 镜像小, 无 Isaac-GR00T 完整包, 无训练栈 (accelerate/datasets)
+# 无 Isaac-GR00T 完整包, 无训练栈 (accelerate/datasets)
+# 注: 训练在 AutoDL 云端, 不在本地 Docker
 # ============================================================================
 FROM gr00t-mjlab-base:latest
 
@@ -18,7 +19,7 @@ RUN pip install --no-cache-dir \
         scipy
 
 # gr00t 要求 Python 3.10 (与 base 镜像的 3.12 不兼容)
-# 用 uv 创建独立 3.10 venv (与 train 镜像共用 Python 3.10)
+# 用 uv 创建独立 3.10 venv
 # tensorrt_cu12_libs (~800MB) 是 gr00t 间接依赖, mmap 下载会 OOM (< 2GB 宿主)
 #   解决: uv 用 `--no-binary-package tensorrt-cu12-libs` 改为源码安装会失败,
 #         实际方案是在 conda 镜像或云端构建, 本地构建跳过该包 + `--no-deps` 后手动 pip

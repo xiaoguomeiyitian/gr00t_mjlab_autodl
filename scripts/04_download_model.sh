@@ -1,17 +1,29 @@
 #!/usr/bin/env bash
 # ============================================================================
-# 第 3 步: 从 AutoDL 下载训练好的模型到本地
+# 第 4 步: 从 AutoDL 下载训练好的模型到本地 (下载 → 解压 → 验证)
 #
 # 运行环境: 本地
-# 作用: SCP 下载模型包 → 解压 → 验证
+# 作用: SCP 下载模型包 (FP16 全量 + INT4 量化) → 解压 → 校验
+#
+# 前置条件:
+#   - 已填写 scripts/_ssh_config.sh 中的 SSH_HOST / SSH_PORT
+#   - 云端 [3] 已训练完成, 模型包在 /root/workspace/ 下
 #
 # 用法:
-#   ./03_download_model.sh root@xxx.autodl.com -p 12345 --robot g1
+#   ./04_download_model.sh                              # 用 _ssh_config.sh 的配置
+#   ./04_download_model.sh --robot g1
+#   ./04_download_model.sh --host root@x.com -p 12345  # 命令行覆盖
+#   ./04_download_model.sh --with-int4                  # 同时下载 INT4 包
 # ============================================================================
 set -euo pipefail
 
+# ── 加载 SSH 配置 ──────────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/_ssh_config.sh"
+
 # 项目根目录 = 脚本所在目录
-PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SRC_DIR="$PROJECT_ROOT/src"
 
 # ── 颜色 ────────────────────────────────────────────────────────────────────
@@ -53,9 +65,16 @@ while [[ $# -gt 0 ]]; do
         --no-int4)      INCLUDE_INT4=false;  shift   ;;   # 兼容别名
         --with-fp16)    INCLUDE_FP16=true;   shift   ;;   # 兼容别名
         --no-fp16)      INCLUDE_FP16=false;  shift   ;;
+        # SSH 覆盖 (命令行优先)
+        --host)         SSH_HOST="$2";       shift 2 ;;
+        --user)         SSH_USER="$2";       shift 2 ;;
+        --key)          SSH_KEY="$2";        shift 2 ;;
+        --remote-dir)   REMOTE_DIR="$2";     shift 2 ;;
         -h|--help)
             cat <<EOF
-用法: $0 <user@host> -p <port> [--robot g1|go2] [选项]
+用法: $0 [user@host] [-p PORT] [--robot g1|go2] [选项]
+
+如果未传 user@host, 会自动读取 scripts/_ssh_config.sh 中的 SSH_HOST
 
 下载选项 (默认只下载 FP16, 本地自行量化):
   --with-int4      同时下载云端 INT4 量化包 (~1.5GB)
@@ -66,16 +85,20 @@ while [[ $# -gt 0 ]]; do
 其他选项:
   --skip-verify    下载后跳过验证
   --local-dir DIR  模型解压目录 (默认: 项目根/models)
+  --host HOST      覆盖 SSH 主机
+  --user USER      覆盖 SSH 用户
+  --key PATH       覆盖 SSH 私钥路径
+  --remote-dir DIR 覆盖云端工作目录
 
 示例:
-  # 推荐: 只下载 FP16 (7GB), 本地用 05_local_quantize.sh 转 INT4
-  $0 root@host -p 12345 --robot g1
+  # 推荐: 用 _ssh_config.sh 配置, 只下载 FP16
+  $0 --robot g1
 
-  # 同时下 FP16 + INT4 (旧行为, 8.5GB)
+  # 命令行覆盖, 同时下 FP16 + INT4
   $0 root@host -p 12345 --robot g1 --with-int4
 
   # 只下 INT4 (假定本地已有 FP16)
-  $0 root@host -p 12345 --robot g1 --no-fp16 --with-int4
+  $0 --robot g1 --no-fp16 --with-int4
 EOF
             exit 0
             ;;
@@ -93,6 +116,13 @@ EOF
     esac
 done
 
+# SSH_HOST 归一化 (兼容 "host" 或 "user@host")
+if [ -n "$SSH_HOST" ] && [[ "$SSH_HOST" != *@* ]] && [ -n "$SSH_USER" ]; then
+    SSH_HOST="${SSH_USER}@${SSH_HOST}"
+fi
+# 端口默认值
+[ -z "$SSH_PORT" ] && SSH_PORT="22"
+
 # 默认包名 (与 02_autodl_train.sh 一致)
 [ -z "$PACK_NAME" ] && PACK_NAME="${ROBOT}_gr00t_model.tar.gz"
 [ -z "$INT4_PACK" ] && INT4_PACK="${ROBOT}_gr00t_int4_model.tar.gz"
@@ -103,19 +133,25 @@ FP16_PACK_NAMES=(
 )
 
 if [ -z "$SSH_HOST" ]; then
-    fail "请提供 SSH 地址, 例: $0 root@xxx.autodl.com -p 12345"
+    _ssh_config_warn
+    fail "未提供 SSH 信息, 请填写 scripts/_ssh_config.sh 或命令行传 user@host -p PORT"
 fi
-if [ -z "$SSH_PORT" ]; then
-    fail "请提供 SSH 端口 (-p)"
-fi
+
+# 构造 SSH/SCP 基础参数
+SSH_BASE_ARGS=(-p "$SSH_PORT" $SSH_OPTS)
+[ -n "$SSH_KEY" ] && SSH_BASE_ARGS+=(-i "$SSH_KEY")
+SCP_ARGS=(-P "$SSH_PORT" $SSH_OPTS)
+[ -n "$SSH_KEY" ] && SCP_ARGS+=(-i "$SSH_KEY")
 
 echo ""
 echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║${NC}  GR00T × unitree_rl_mjlab × AutoDL — 第 3 步: 下载模型         ${CYAN}║${NC}"
+echo -e "${CYAN}║${NC}  GR00T × unitree_rl_mjlab × AutoDL — 第 4 步: 下载模型         ${CYAN}║${NC}"
 echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 info "SSH:    $SSH_HOST"
 info "端口:   $SSH_PORT"
+[ -n "$SSH_KEY" ] && info "认证:   密钥 ($SSH_KEY)" || warn "认证:   密码 (推荐改用 SSH_KEY)"
+info "远端:   $REMOTE_DIR"
 info "机器人: $ROBOT"
 echo ""
 info "下载计划:"
@@ -129,7 +165,7 @@ echo ""
 
 # ── 测试 SSH ────────────────────────────────────────────────────────────────
 step "测试 SSH 连接..."
-if ssh -p "$SSH_PORT" -o ConnectTimeout=10 -o StrictHostKeyChecking=no "$SSH_HOST" "echo 'SSH OK'" 2>/dev/null; then
+if ssh "${SSH_BASE_ARGS[@]}" -o ConnectTimeout=10 "$SSH_HOST" "echo 'SSH OK'" 2>/dev/null; then
     info "SSH 连接正常"
 else
     fail "SSH 连接失败"
@@ -139,11 +175,11 @@ fi
 step "检查远端模型包..."
 
 REMOTE_PACK=""
-SEARCH_PATHS=(/root/workspace /workspace /root)
+SEARCH_PATHS=("$REMOTE_DIR" /workspace /root)
 for candidate in "${FP16_PACK_NAMES[@]}"; do
     for base in "${SEARCH_PATHS[@]}"; do
         p="$base/$candidate"
-        if ssh -p "$SSH_PORT" "$SSH_HOST" "test -f '$p'" 2>/dev/null; then
+        if ssh "${SSH_BASE_ARGS[@]}" "$SSH_HOST" "test -f '$p'" 2>/dev/null; then
             REMOTE_PACK="$p"
             REMOTE_PACK_NAME="$candidate"
             break 2
@@ -152,11 +188,11 @@ for candidate in "${FP16_PACK_NAMES[@]}"; do
 done
 
 if [ -z "$REMOTE_PACK" ]; then
-    fail "未找到 FP16 模型包 (尝试: ${FP16_PACK_NAMES[*]})\n常见路径: /root/workspace/ 或 /workspace/"
+    fail "未找到 FP16 模型包 (尝试: ${FP16_PACK_NAMES[*]})\n常见路径: $REMOTE_DIR/  /workspace/"
 fi
 info "远端 FP16 模型包: $REMOTE_PACK"
 
-REMOTE_SIZE=$(ssh -p "$SSH_PORT" "$SSH_HOST" "du -h '$REMOTE_PACK' | cut -f1")
+REMOTE_SIZE=$(ssh "${SSH_BASE_ARGS[@]}" "$SSH_HOST" "du -h '$REMOTE_PACK' | cut -f1")
 info "远端大小: $REMOTE_SIZE"
 
 # ── 创建本地目录 ────────────────────────────────────────────────────────────
@@ -166,7 +202,7 @@ mkdir -p "$LOCAL_MODEL_DIR"
 if $INCLUDE_FP16; then
     step "下载 FP16 全量模型 (供高显存 GPU 使用)..."
     LOCAL_PACK="$LOCAL_MODEL_DIR/$REMOTE_PACK_NAME"
-    scp -P "$SSH_PORT" -o StrictHostKeyChecking=no "$SSH_HOST:$REMOTE_PACK" "$LOCAL_PACK"
+    scp "${SCP_ARGS[@]}" "$SSH_HOST:$REMOTE_PACK" "$LOCAL_PACK"
     FP16_SIZE=$(du -h "$LOCAL_PACK" | cut -f1)
     info "✅ FP16 全量模型已下载: $LOCAL_PACK ($FP16_SIZE)"
 else
@@ -178,7 +214,7 @@ if $INCLUDE_INT4; then
     REMOTE_INT4=""
     for base in "${SEARCH_PATHS[@]}"; do
         p="$base/$INT4_PACK"
-        if ssh -p "$SSH_PORT" "$SSH_HOST" "test -f '$p'" 2>/dev/null; then
+        if ssh "${SSH_BASE_ARGS[@]}" "$SSH_HOST" "test -f '$p'" 2>/dev/null; then
             REMOTE_INT4="$p"
             break
         fi
@@ -187,7 +223,7 @@ if $INCLUDE_INT4; then
     if [ -n "$REMOTE_INT4" ]; then
         step "下载 INT4 量化模型 (供低显存 GPU 使用)..."
         LOCAL_INT4="$LOCAL_MODEL_DIR/$INT4_PACK"
-        scp -P "$SSH_PORT" -o StrictHostKeyChecking=no "$SSH_HOST:$REMOTE_INT4" "$LOCAL_INT4"
+        scp "${SCP_ARGS[@]}" "$SSH_HOST:$REMOTE_INT4" "$LOCAL_INT4"
         INT4_SIZE=$(du -h "$LOCAL_INT4" | cut -f1)
         info "✅ INT4 量化模型已下载: $LOCAL_INT4 ($INT4_SIZE)"
     else

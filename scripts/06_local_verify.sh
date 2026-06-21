@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # ============================================================================
-# 第 4 步: 本地验证微调后的 GR00T 模型
+# 第 6 步: 本地验证微调后的 GR00T 模型 (推理验证)
 #
 # 运行环境: 本地 (RTX 2080 8GB 起)
 # 作用: 加载微调后的 GR00T 模型, 在 unitree_rl_mjlab 仿真中运行推理验证
 #
 # 用法:
-#   ./04_local_verify.sh --robot g1
-#   ./04_local_verify.sh --robot g1 --model-path models/g1_gr00t_int4
+#   ./06_local_verify.sh --robot g1
+#   ./06_local_verify.sh --robot g1 --model-path models/g1_gr00t_int4
 # ============================================================================
 set -euo pipefail
 
@@ -98,7 +98,7 @@ fi
 
 echo ""
 echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║${NC}  GR00T × unitree_rl_mjlab × AutoDL — 第 4 步: 本地验证推理    ${CYAN}║${NC}"
+echo -e "${CYAN}║${NC}  GR00T × unitree_rl_mjlab × AutoDL — 第 6 步: 本地验证推理    ${CYAN}║${NC}"
 echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 info "机器人:     $ROBOT"
@@ -195,3 +195,4 @@ echo "下一步建议:"
 echo "  1. 调整 --instruction 测试不同任务"
 echo "  2. 收集更多 episodes 重新训练 (--episodes 500+)"
 echo ""
+echo "或查看完整流程: cat README.md"

@@ -8,8 +8,10 @@
 #          ./build.sh all
 #          ./build.sh --mirror cn collect
 #          ./build.sh --rebuild-base collect
-#          ./build.sh --no-rebuild-base train
+#          ./build.sh --no-rebuild-base infer
 #          ./build.sh --base                # 只构建基础镜像
+#
+# 注: 训练在 AutoDL 云端进行, 不需要本地训练镜像
 # ============================================================================
 set -euo pipefail
 
@@ -155,16 +157,14 @@ run_interactive() {
 
     local idx=$(prompt_select "请选择要构建的镜像:" \
         "collect   (数据采集, 最小, ~5GB)" \
-        "train     (GR00T 训练, 最大, ~12GB)" \
         "infer     (推理验证, 中等, ~7GB)" \
-        "all       (构建全部三个)")
+        "all       (构建 collect + infer)")
 
     local VARIANTS=()
     case "$idx" in
         0) VARIANTS=(collect) ;;
-        1) VARIANTS=(train) ;;
-        2) VARIANTS=(infer) ;;
-        3) VARIANTS=(collect train infer) ;;
+        1) VARIANTS=(infer) ;;
+        2) VARIANTS=(collect infer) ;;
     esac
 
     local action_idx=$(prompt_select "请选择操作类型:" \
@@ -196,8 +196,8 @@ run_noninteractive() {
             --rebuild-base)   REBUILD_BASE=true ;;
             --no-rebuild-base) NO_REBUILD_BASE=true ;;
             --base)           BASE_ONLY=true ;;
-            collect|train|infer) VARIANTS+=("$1") ;;
-            all)              VARIANTS=(collect train infer); break ;;
+            collect|infer) VARIANTS+=("$1") ;;
+            all)              VARIANTS=(collect infer); break ;;
             *) log_error "未知参数: $1"; exit 1 ;;
         esac
         shift
@@ -210,7 +210,7 @@ run_noninteractive() {
     fi
 
     if [ ${#VARIANTS[@]} -eq 0 ]; then
-        log_error "请指定要构建的镜像: collect|train|infer|all"
+        log_error "请指定要构建的镜像: collect|infer|all"
         exit 1
     fi
 
