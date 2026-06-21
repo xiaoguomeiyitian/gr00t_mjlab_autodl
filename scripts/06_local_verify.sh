@@ -32,7 +32,7 @@ INSTRUCTION="walk forward"
 MAX_STEPS=200
 SHOW_VIEWER=false
 QUANTIZE="auto"
-AUTO_QUANTIZE=false   # 如果 INT4 不存在, 自动从 FP16 量化生成 (本地 8GB 推荐)
+AUTO_QUANTIZE=false   # 如果 INT4 不存在, 自动从 BF16 量化生成 (本地 8GB 推荐)
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -42,7 +42,7 @@ while [[ $# -gt 0 ]]; do
         --max-steps)    MAX_STEPS="$2";    shift 2 ;;
         --quantize)     QUANTIZE="$2";     shift 2 ;;
         --show-viewer)  SHOW_VIEWER=true;  shift   ;;
-        --auto-quantize) AUTO_QUANTIZE=true; shift ;;   # 自动从 FP16 量化
+        --auto-quantize) AUTO_QUANTIZE=true; shift ;;   # 自动从 BF16 量化
         -h|--help)
             cat <<EOF
 用法: $0 [--robot g1|go2] [--model-path PATH] [选项]
@@ -50,7 +50,7 @@ while [[ $# -gt 0 ]]; do
 模型选择:
   --model-path PATH   指定模型目录 (默认按优先级自动查找)
   --quantize MODE     量化模式: auto | none | 4bit | 8bit (默认 auto)
-  --auto-quantize     当 INT4 不存在时, 自动从 FP16 量化 (本地 8GB 推荐)
+  --auto-quantize     当 INT4 不存在时, 自动从 BF16 量化 (本地 8GB 推荐)
 
 推理:
   --instruction TEXT  语言指令 (默认 "walk forward")
@@ -58,14 +58,14 @@ while [[ $# -gt 0 ]]; do
   --show-viewer      显示可视化窗口
 
 示例:
-  # 默认: 优先用 INT4 → FP16 → LoRA
+  # 默认: 优先用 INT4 → BF16 完整模型
   $0 --robot g1
 
   # 8GB 显卡: 自动本地量化
   $0 --robot g1 --auto-quantize
 
-  # 24GB+ 显卡: 强制用 FP16 全量
-  $0 --robot g1 --model-path models/g1_gr00t_full_fp16 --quantize none
+  # 24GB+ 显卡: 强制用 BF16 完整模型
+  $0 --robot g1 --model-path models/g1_gr00t --quantize none  # 旧名 (兼容)
 
   # 指定 INT4 模型
   $0 --robot g1 --model-path models/g1_gr00t_int4 --quantize 4bit
@@ -78,11 +78,11 @@ done
 
 # ── 自动查找模型 ────────────────────────────────────────────────────────────
 if [ -z "$MODEL_PATH" ]; then
-    # 优先查找顺序: INT4 (低显存) → FP16 全量 (高显存) → LoRA adapter → 其他
+    # 优先查找顺序: INT4 (低显存) → BF16 完整 (高显存) → 旧名 _full_fp16
     SEARCH_DIRS=(
         "$PROJECT_ROOT/models/${ROBOT}_gr00t_int4"
-        "$PROJECT_ROOT/models/${ROBOT}_gr00t_full_fp16"
         "$PROJECT_ROOT/models/${ROBOT}_gr00t"
+        "$PROJECT_ROOT/models/${ROBOT}_gr00t_full_fp16"
         "$PROJECT_ROOT/models/${ROBOT}_gr00t_finetuned"
     )
     for d in "${SEARCH_DIRS[@]}"; do
@@ -142,10 +142,18 @@ elif [ "$QUANTIZE" = "auto" ]; then
 fi
 
 # ── 自动本地量化 (--auto-quantize) ─────────────────────────────────────────
-# 场景: 本地只有 FP16 全量 (8GB 显存), 想用 INT4 推理
-# 做法: 调用 05_local_quantize.sh 把 FP16 → INT4, 然后用 INT4 推理
+# 场景: 本地只有 BF16 完整模型 (8GB 显存), 想用 INT4 推理
+# 做法: 调用 05_local_quantize.sh 把 BF16 → INT4, 然后用 INT4 推理
 if $AUTO_QUANTIZE && [ "$QUANTIZE" != "4bit" ]; then
-    FP16_DIR="$PROJECT_ROOT/models/${ROBOT}_gr00t_full_fp16"
+    # 优先新名 (03_autodl_train.sh 输出), fallback 到旧名 _full_fp16
+    BF16_DIR=""
+    for cand in "$PROJECT_ROOT/models/${ROBOT}_gr00t" \
+                "$PROJECT_ROOT/models/${ROBOT}_gr00t_full_fp16"; do
+        if [ -d "$cand" ] && [ "$(ls -A "$cand" 2>/dev/null)" ]; then
+            BF16_DIR="$cand"
+            break
+        fi
+    done
     INT4_DIR="$PROJECT_ROOT/models/${ROBOT}_gr00t_int4"
 
     # 如果 INT4 已存在, 直接用
@@ -153,18 +161,18 @@ if $AUTO_QUANTIZE && [ "$QUANTIZE" != "4bit" ]; then
         info "检测到已存在的 INT4 模型, 直接使用"
         MODEL_PATH="$INT4_DIR"
         QUANTIZE="4bit"
-    # 否则从 FP16 自动量化
-    elif [ -d "$FP16_DIR" ] && [ "$(ls -A "$FP16_DIR" 2>/dev/null)" ]; then
-        step "本地 FP16 → INT4 自动量化 (8GB 显卡友好)..."
+    # 否则从 BF16 自动量化
+    elif [ -n "$BF16_DIR" ]; then
+        step "本地 BF16 → INT4 自动量化 (8GB 显卡友好)..."
         bash "$PROJECT_ROOT/scripts/05_local_quantize.sh" \
             --robot "$ROBOT" \
-            --input "$FP16_DIR" \
+            --input "$BF16_DIR" \
             --output "$INT4_DIR" \
             --offline
         MODEL_PATH="$INT4_DIR"
         QUANTIZE="4bit"
     else
-        fail "--auto-quantize 需要本地有 FP16 全量模型: $FP16_DIR"
+        fail "--auto-quantize 需要本地有 BF16 完整模型: models/${ROBOT}_gr00t/ (或 ${ROBOT}_gr00t_full_fp16/)"
     fi
 fi
 

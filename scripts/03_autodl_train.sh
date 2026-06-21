@@ -201,7 +201,7 @@ echo ""
 # ════════════════════════════════════════════════════════════════════════════
 # Phase 2: Fine-tune 训练 (官方默认: projector + diffusion, 关闭 LLM/visual)
 # ════════════════════════════════════════════════════════════════════════════
-step "Phase 2/3: Fine-tune 训练..."
+step "Phase 2/4: Fine-tune 训练..."
 cd "$GR00T_REPO"
 mkdir -p "$OUTPUT_DIR"
 
@@ -246,7 +246,7 @@ if $SKIP_INT4; then
     warn "Phase 3: 跳过 INT4 量化 (--no-export-int4)"
     INT4_DIR=""
 else
-    step "Phase 3/3: INT4 量化导出..."
+    step "Phase 3/4: INT4 量化导出..."
 
     EXPORT_SCRIPT="/root/gr00t_mjlab_autodl/src/export_int4.py"
     if [ ! -f "$EXPORT_SCRIPT" ]; then
@@ -270,7 +270,7 @@ echo ""
 # ════════════════════════════════════════════════════════════════════════════
 # Phase 4: 打包模型
 # ════════════════════════════════════════════════════════════════════════════
-step "打包模型..."
+step "Phase 4/4: 打包模型..."
 
 PACK_BASE_DIR="/root/workspace"
 mkdir -p "$PACK_BASE_DIR"

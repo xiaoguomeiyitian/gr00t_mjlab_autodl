@@ -1,37 +1,23 @@
 #!/usr/bin/env python3
 """
-INT4 量化导出 — 将 GR00T fine-tune 后的模型量化为 INT4 (NF4 + double-quant)
+INT4 量化导出 — 将 GR00T fine-tune 后的 BF16 完整模型量化为 INT4 (NF4 + double-quant)
 
 **纯后训练量化 (Post-Training Quantization)** —— 不需要重新训练,
-仅将 FP16 权重转换为 INT4 表示 (NF4 + double-quant), 8GB 显存即可完成。
+仅将 BF16 权重转换为 INT4 表示 (NF4 + double-quant), 8GB 显存即可完成。
 
-支持三种输入模式:
-  1) LoRA adapter 目录 (含 adapter_config.json)
-       → 加载基础模型 + 合并 LoRA → INT4 量化
-  2) FP16 全量模型目录 (含 config.json + *.safetensors)
-       → 直接 INT4 量化 (无需再加载基础模型)
-  3) HuggingFace ID (默认 nvidia/GR00T-N1.7-3B)
-       → 远程下载 + INT4 量化 (需要联网)
+输入模式:
+  1) BF16 完整模型目录 (含 config.json + *.safetensors)  ⭐ 推荐
+  2) HuggingFace ID (默认 nvidia/GR00T-N1.7-3B) — 远程下载 + 量化
+
+> **说明**: Isaac-GR00T 官方训练不支持 LoRA (peft 是依赖但未使用),
+> 训练输出 OUTPUT_DIR 本身就是完整可推理模型, 无需 merge 步骤。
 
 使用方法:
-    # 场景 A: 已有 FP16 全量模型 (本地下载 + 本地量化) ⭐ 推荐
+    # ⭐ 本地 BF16 完整模型 → INT4 (推荐, 无需联网)
     python export_int4.py \\
         --input-type fp16 \\
-        --model-dir /root/models/g1_gr00t_full_fp16 \\
-        --output-dir /root/models/g1_gr00t_int4
-
-    # 场景 B: 仅有 LoRA adapter (云端量化场景)
-    python export_int4.py \\
-        --input-type lora \\
         --model-dir /root/models/g1_gr00t \\
         --output-dir /root/models/g1_gr00t_int4
-
-    # 场景 C: 离线环境 (禁用 HF 在线检查)
-    python export_int4.py \\
-        --input-type fp16 \\
-        --model-dir /root/models/g1_gr00t_full_fp16 \\
-        --output-dir /root/models/g1_gr00t_int4 \\
-        --offline
 """
 
 from __future__ import annotations
@@ -57,18 +43,15 @@ def export_int4(
     offline: bool = False,
     device_map: str = "auto",
 ) -> str:
-    """将 fine-tune 后的模型量化为 INT4。
+    """将 fine-tune 后的 BF16 完整模型量化为 INT4。
 
     Args:
-        model_dir: 输入目录
-            - LoRA 模式:  含 adapter_config.json 的 adapter 目录
-            - FP16 模式:  含 config.json + *.safetensors 的完整模型目录
+        model_dir: BF16 完整模型目录 (含 config.json + *.safetensors)
         output_dir: INT4 量化模型输出目录
-        model_path: HuggingFace 模型 ID (仅 LoRA 模式 / 远程模式需要)
-        input_type: 输入类型 ("auto" | "lora" | "fp16")
-            - "auto": 根据 model_dir 是否含 adapter_config.json 自动判断
-            - "lora": 显式指定为 LoRA adapter (需联网下载基础模型)
-            - "fp16": 显式指定为完整 FP16 模型 (无需联网)
+        model_path: HuggingFace 模型 ID (仅远程模式需要)
+        input_type: 输入类型 ("auto" | "fp16")
+            - "auto": 根据 model_dir 是否含 config.json 自动判断
+            - "fp16": 显式指定为 BF16 完整模型 (无需联网)
         offline: 离线模式 (TRANSFORMERS_OFFLINE=1, 禁止 HF 在线下载)
         device_map: 设备映射 ("auto" | "cpu" | "cuda:0")
 
@@ -79,7 +62,7 @@ def export_int4(
         import torch
         from transformers import BitsAndBytesConfig
     except ImportError as e:
-        logger.error("需要安装: pip install bitsandbytes accelerate peft transformers")
+        logger.error("需要安装: pip install bitsandbytes accelerate transformers")
         sys.exit(1)
 
     model_path_obj = Path(model_dir)
@@ -97,13 +80,11 @@ def export_int4(
 
     # ── 0. 自动检测输入类型 ─────────────────────────────────────────────
     if input_type == "auto":
-        if (model_path_obj / "adapter_config.json").exists():
-            input_type = "lora"
-        elif (model_path_obj / "config.json").exists():
+        if (model_path_obj / "config.json").exists():
             input_type = "fp16"
         else:
             logger.error("无法自动判断输入类型: %s", model_dir)
-            logger.error("  请用 --input-type 显式指定 (lora | fp16)")
+            logger.error("  请用 --input-type fp16 显式指定")
             sys.exit(1)
         logger.info("自动检测输入类型: %s", input_type)
 
@@ -123,13 +104,13 @@ def export_int4(
     )
 
     if input_type == "fp16":
-        # ── 场景 A: 本地 FP16 全量模型直接量化 ─────────────────────────
+        # ── 场景 A: 本地 BF16 完整模型直接量化 ─────────────────────────
         logger.info("=" * 60)
-        logger.info("输入: FP16 全量模型 (本地, 无需联网)")
+        logger.info("输入: BF16 完整模型 (本地, 无需联网)")
         logger.info("  路径: %s", model_dir)
         logger.info("=" * 60)
 
-        step("加载 FP16 模型并直接量化为 INT4...")
+        step("加载 BF16 模型并直接量化为 INT4...")
         try:
             base = AutoModelForCausalLM.from_pretrained(
                 str(model_path_obj),
@@ -137,56 +118,24 @@ def export_int4(
                 device_map=device_map,
                 trust_remote_code=True,
             )
-            logger.info("✅ FP16 模型加载并量化完成")
+            logger.info("✅ BF16 模型加载并量化完成")
         except Exception as e:
-            logger.error("FP16 模型加载失败: %s", e)
+            logger.error("BF16 模型加载失败: %s", e)
             sys.exit(1)
 
-        # FP16 全量模型已含合并后的权重, 无需再 merge LoRA
+        # BF16 完整模型已含合并后的权重, 直接量化即可
         model = base
         tokenizer_source = str(model_path_obj)
 
     else:
-        # ── 场景 B: LoRA adapter → 合并 + 量化 ─────────────────────────
-        logger.info("=" * 60)
-        logger.info("输入: LoRA adapter (需联网加载基础模型)")
-        logger.info("  Adapter: %s", model_dir)
-        logger.info("  Base:   %s", model_path)
-        logger.info("=" * 60)
-
-        step("加载基础模型 (INT4 量化)...")
-        try:
-            base = AutoModelForCausalLM.from_pretrained(
-                model_path,
-                quantization_config=quant_config,
-                device_map=device_map,
-                trust_remote_code=True,
-            )
-            logger.info("✅ 基础模型加载成功")
-        except Exception as e:
-            logger.error("基础模型加载失败: %s", e)
-            logger.info("提示: 如果是 LoRA 模式, 请用 --input-type fp16 切换到本地 FP16 输入")
-            logger.info("提示: 或在本地先运行 merge_lora.py 生成完整 FP16 模型")
-            sys.exit(1)
-
-        # ── 加载并合并 LoRA ──────────────────────────────────────────
-        step("检测到 LoRA adapter, 合并权重...")
-        try:
-            from peft import PeftModel
-            model = PeftModel.from_pretrained(base, str(model_path_obj))
-            model = model.merge_and_unload()
-            logger.info("✅ LoRA adapter 合并完成")
-        except Exception as e:
-            logger.error("LoRA 合并失败: %s", e)
-            sys.exit(1)
-
-        tokenizer_source = model_path
-
+        # argparse choices 已限制 input_type 只能是 "auto" | "fp16", 此分支不可达
+        logger.error("不支持的 input_type: %s", input_type)
+        sys.exit(1)
     # ── 2. 保存 INT4 模型 ───────────────────────────────────────────────
     step("保存 INT4 量化模型...")
     model.save_pretrained(str(output_path))
 
-    # 保存 tokenizer (优先从本地 FP16 模型读, 失败则从 HF 读)
+    # 保存 tokenizer (优先从本地 BF16 模型读, 失败则从 HF 读)
     try:
         tok = AutoTokenizer.from_pretrained(
             tokenizer_source,
@@ -223,31 +172,26 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  # ⭐ 本地 FP16 → INT4 (推荐, 无需联网)
+  # ⭐ 本地 BF16 完整模型 → INT4 (推荐, 无需联网)
   python export_int4.py --input-type fp16 \\
-      --model-dir models/g1_gr00t_full_fp16 \\
-      --output-dir models/g1_gr00t_int4
-
-  # LoRA → 合并 + INT4 (云端量化场景)
-  python export_int4.py --input-type lora \\
       --model-dir models/g1_gr00t \\
       --output-dir models/g1_gr00t_int4
 
   # 离线模式
   python export_int4.py --input-type fp16 --offline \\
-      --model-dir models/g1_gr00t_full_fp16 \\
+      --model-dir models/g1_gr00t \\
       --output-dir models/g1_gr00t_int4
         """,
     )
     parser.add_argument("--model-dir", type=str, required=True,
-                        help="输入目录 (FP16 全量模型 OR LoRA adapter)")
+                        help="输入目录 (BF16 完整模型, 含 config.json + *.safetensors)")
     parser.add_argument("--output-dir", type=str, required=True,
                         help="INT4 模型输出目录")
     parser.add_argument("--model-path", type=str, default="nvidia/GR00T-N1.7-3B",
                         help="基础模型 HuggingFace ID (仅 --input-type lora 有效)")
     parser.add_argument("--input-type", type=str, default="auto",
-                        choices=["auto", "lora", "fp16"],
-                        help="输入类型 (默认 auto 自动检测)")
+                        choices=["auto", "fp16"],
+                        help="输入类型 (默认 auto 自动检测, 仅支持 fp16 完整模型)")
     parser.add_argument("--offline", action="store_true",
                         help="离线模式: 禁止 HF 在线下载 (TRANSFORMERS_OFFLINE=1)")
     parser.add_argument("--device-map", type=str, default="auto",

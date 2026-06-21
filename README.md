@@ -18,7 +18,7 @@
 │   脚本化步态 (G1/Go2)           │  SCP 下载 [4]   │  - Fine-tune (官方默认)          │
 │                                 │ ◀──────────────│  - Phase 3: BF16 完整 (~7GB)    │
 │ ③ 本地 INT4 量化 (可选) [5]     │                 │  - Phase 3.5: INT4 (~1.5GB)    │
-│   FP16 → INT4 PTQ (16GB 友好)  │                 │  - Phase 4: 双模型打包          │
+│   BF16 → INT4 PTQ (8GB 友好)   │                 │  - Phase 4: 双模型打包          │
 │ ② 转换 LeRobot v2               │                 │                                  │
 │   parquet + modality.json       │                 │  ⚠️ 官方训练**不支持 LoRA**       │
 │ ④ 本地推理验证 [6]              │                 │    (peft 装但未使用)             │
@@ -38,11 +38,11 @@
  │       ↓                                                              │
  │ [2] 02_upload_to_autodl.sh   SCP 上传训练包 + 训练脚本到 AutoDL       │
  │       ↓                                                              │
- │ [3] 03_autodl_train.sh       云端解压 + Fine-tune + 打包 (FP16/INT4)  │
+ │ [3] 03_autodl_train.sh       云端解压 + Fine-tune + 打包 (BF16/INT4)    │
  │       ↓                                                              │
  │ [4] 04_download_model.sh     SCP 下载训练好的模型包到本地             │
  │       ↓                                                              │
- │ [5] 05_local_quantize.sh     本地 FP16 → INT4 (可选, 8GB 显存友好)    │
+ │ [5] 05_local_quantize.sh     本地 BF16 → INT4 (可选, 8GB 显存友好)    │
  │       ↓                                                              │
  │ [6] 06_local_verify.sh       加载模型 + 在 mjlab 中推理验证           │
  └─────────────────────────────────────────────────────────────────────┘
@@ -69,17 +69,16 @@ gr00t_mjlab_autodl/                # 本项目 (与 unitree_rl_mjlab/ 同级)
 │   ├── 00_autodl_init.sh          # [0] 云端环境初始化 (一次性, 只需首次运行)
 │   ├── 01_local_collect.sh         # [1] 数据采集: 本地 mjlab 收集 + 打包
 │   ├── 02_upload_to_autodl.sh      # [2] 上传云端: SCP 训练包 + 训练脚本
-│   ├── 03_autodl_train.sh          # [3] 云端训练: 解压 + LoRA + FP16 + INT4 打包
-│   ├── 04_download_model.sh        # [4] 模型下载: SCP 下载 FP16 (默认, 可选 INT4)
-│   ├── 05_local_quantize.sh        # [5] 本地量化 (可选): FP16 → INT4 (PTQ, 8GB 友好)
+│   ├── 03_autodl_train.sh          # [3] 云端训练: 解压 + Fine-tune + 打包 (BF16/INT4)
+│   ├── 04_download_model.sh        # [4] 模型下载: SCP 下载 BF16 (默认, 可选 INT4)
+│   ├── 05_local_quantize.sh        # [5] 本地量化 (可选): BF16 → INT4 (PTQ, 8GB 友好)
 │   └── 06_local_verify.sh          # [6] 本地推理: 验证推理输出 (支持 --auto-quantize)
 │
 ├── src/                            # 核心 Python 代码
 │   ├── __init__.py
 │   ├── collect_data.py             # 数据收集器 (基于 unitree_rl_mjlab)
 │   ├── convert_to_lerobot.py       # npz → LeRobot v2 格式
-│   ├── merge_lora.py               # LoRA 合并 → 完整 FP16 模型 (~7GB)
-│   ├── export_int4.py              # INT4 量化导出 (~1.5GB)
+│   ├── export_int4.py              # INT4 量化导出 (PTQ, 约 7GB → 1.5GB)
 │   ├── infer.py                    # 本地推理包装器 (mjlab + GR00T)
 │   └── configs/
 │       ├── __init__.py
@@ -105,7 +104,8 @@ data/                              # 数据输出
 ├── go2_raw/
 └── go2_lerobot/
 models/                            # 下载的模型
-├── g1_gr00t_full_fp16/             # FP16 全量 (~7GB, 高显存 GPU)
+├── g1_gr00t/                       # BF16 完整模型 (~7GB, 高显存 GPU, 03 输出原生格式)
+├── g1_gr00t_full_fp16/             # symlink 别名 (兼容旧脚本) / 旧下载目录
 └── g1_gr00t_int4/                  # INT4 量化 (~1.5GB, 低显存 GPU)
 ```
 
@@ -355,44 +355,47 @@ INSTRUCTION="walk forward" MODEL_PATH=/root/models/g1_gr00t_int4 ./start.sh 6
 
 ---
 
-## 🎯 模型推理: FP16 全量 vs INT4 量化
+## 🎯 模型推理: BF16 完整模型 vs INT4 量化
 
-云端训练完成后, 默认会**生成 FP16 全量模型包** (~7GB), INT4 量化在**本地完成**:
+云端训练完成后, 默认会**生成 BF16 完整模型包** (~7GB), INT4 量化在**本地完成**:
+
+> **为什么是 BF16 不是 FP16?** Isaac-GR00T 官方训练使用 `bf16=True` (PyTorch 训练配置),输出是原生 BF16 完整模型,无需再 merge LoRA 或转 FP16。BF16 与 FP16 在数值精度上几乎等价 (都是 16-bit 浮点, BF16 指数位更多利于训练稳定性, FP16 尾数位更多利于推理精度)。
 
 | 模型包 | 大小 | 适用场景 | 推理质量 |
 |--------|------|----------|----------|
-| `{robot}_gr00t_full_fp16.tar.gz` | ~7GB | **高显存 GPU** (RTX 4090 24GB+, A100 40GB+) | ⭐⭐⭐⭐⭐ 最佳 |
+| `{robot}_gr00t_model.tar.gz` | ~7GB | **高显存 GPU** (RTX 4090 24GB+, A100 40GB+) | ⭐⭐⭐⭐⭐ 最佳 |
+| `{robot}_gr00t_full_fp16.tar.gz` | ~7GB | 同上, symlink 别名 (兼容旧脚本) | ⭐⭐⭐⭐⭐ 最佳 |
 | `{robot}_gr00t_int4_model.tar.gz` | ~1.5GB | **低显存 GPU** (RTX 2080 8GB, RTX 3060 12GB) | ⭐⭐⭐⭐ 良好 |
 
-**Phase 2.5** (`merge_lora.py`): 将训练后的 LoRA adapter 合并到 GR00T 基础模型, 保存完整 FP16 模型。
-**Phase 3** (`export_int4.py`): 在合并的 FP16 模型基础上做 INT4 量化 (NF4 + double-quant), **纯后训练量化 (PTQ), 无需重新训练**。
+**`export_int4.py`**: 在 BF16 完整模型基础上做 INT4 量化 (NF4 + double-quant), **纯后训练量化 (PTQ), 无需重新训练**。
+**旧名兼容**: `g1_gr00t_full_fp16.tar.gz` 是 03 脚本创建的 symlink, 指向主包, 旧脚本仍可读。
 
-### 💡 v2 优化版: 仅下载 FP16, 本地量化 INT4
+### 💡 v2 优化版: 仅下载 BF16, 本地量化 INT4
 
-为了减少云服务器使用时间和下载量, **默认只下载 FP16 全量模型**, 然后在本地 (8GB+ 显存即可) 量化生成 INT4:
+为了减少云服务器使用时间和下载量, **默认只下载 BF16 完整模型**, 然后在本地 (8GB+ 显存即可) 量化生成 INT4:
 
 | 对比项 | 旧版（云端量化） | v2 优化版（本地量化） |
 |--------|----------------|----------------------|
-| 云端 GPU 时间 | 训练 + 合并 + INT4 量化 + 打包 | 训练 + 合并 + 打包 ⬇️ |
+| 云端 GPU 时间 | 训练 + INT4 量化 + 打包 | 训练 + 打包 (INT4 可选) ⬇️ |
 | 下载量 | 7GB + 1.5GB = 8.5GB | **仅 7GB** ⬇️ |
 | 本地显存要求 | 任意（仅推理） | 8GB+ (量化 + 推理) ⬇️ |
 | 是否需要重新训练 | — | **不需要**（PTQ 纯转换） |
 
-**下载脚本** (默认仅下 FP16, SSH 信息从 `_ssh_config.sh` 自动读):
+**下载脚本** (默认仅下 BF16, SSH 信息从 `_ssh_config.sh` 自动读):
 ```bash
-# ⭐ 推荐: 只下载 FP16 (7GB), 本地再量化
+# ⭐ 推荐: 只下载 BF16 完整模型 (7GB), 本地再量化
 ./scripts/04_download_model.sh --robot g1
 
-# 旧行为: 同时下载 FP16 + INT4 (8.5GB)
+# 旧行为: 同时下载 BF16 + INT4 (8.5GB)
 ./scripts/04_download_model.sh --robot g1 --with-int4
 
-# 只下载 INT4 (假定本地已有 FP16)
+# 只下载 INT4 (假定本地已有 BF16)
 ./scripts/04_download_model.sh --robot g1 --no-fp16 --with-int4
 ```
 
 **本地量化** (PTQ, 8GB+ 显存, 5-15 分钟):
 ```bash
-# 默认: 从 models/g1_gr00t_full_fp16/ → models/g1_gr00t_int4/
+# 默认: 从 models/g1_gr00t/ → models/g1_gr00t_int4/
 ./scripts/05_local_quantize.sh --robot g1
 
 # 离线模式 (避免 HF 在线下载触发限流)
@@ -400,40 +403,36 @@ INSTRUCTION="walk forward" MODEL_PATH=/root/models/g1_gr00t_int4 ./start.sh 6
 
 # 显式指定路径
 ./scripts/05_local_quantize.sh \
-    --input models/g1_gr00t_full_fp16 \
+    --input models/g1_gr00t \
     --output models/g1_gr00t_int4
 ```
 
 **一键全流程优化** (推荐 8GB 显存用户):
 ```bash
 # [3] 云端训练: 跳过 INT4 量化 (省 GPU 时间), 后续 ./start.sh 5 在本地生成
-./start.sh 3 --skip-int4-remote
+./start.sh 3 --no-export-int4
 
-# [4] 下载: 同时下 FP16 + INT4 (云端生成了)
+# [4] 下载: 同时下 BF16 + INT4 (云端生成了)
 ./start.sh 4 --with-int4
 
-# [5] 跳过本地量化 (用云端 INT4)
-./start.sh 5 --skip  # (如需支持, 可加 --skip)
-
-# [6] 本地推理: 自动从 FP16 量化 (若只有 FP16)
+# [6] 本地推理: 自动从 BF16 量化 (若只有 BF16)
 ./start.sh 6 --auto-quantize
 ```
 
 本地推理时, 验证脚本会自动选择:
 ```bash
-# 默认: 优先查找 INT4 → FP16 → LoRA (按优先级)
+# 默认: 优先查找 INT4 → BF16 (按优先级)
 ./scripts/06_local_verify.sh --robot g1
 
-# ⭐ 8GB 显卡: 自动从 FP16 量化后推理 (无需先手动量化)
-./scripts/04_local_verify.sh --robot g1 --auto-quantize
+# ⭐ 8GB 显卡: 自动从 BF16 量化后推理 (无需先手动量化)
+./scripts/06_local_verify.sh --robot g1 --auto-quantize
 
-# 显式指定使用 FP16 全量 (高显存 GPU)
-./scripts/04_local_verify.sh --robot g1 \
-    --model-path models/g1_gr00t_full_fp16 --quantize none
+# 显式指定使用 BF16 完整模型 (高显存 GPU)
+./scripts/06_local_verify.sh --robot g1 \
+    --model-path models/g1_gr00t --quantize none
 
 # 显式指定使用 INT4 (低显存 GPU)
-./scripts/04_local_verify.sh --robot g1 \
-    --model-path models/g1_gr00t_int4 --quantize 4bit
+./scripts/06_local_verify.sh --robot g1 \
     --model-path models/g1_gr00t_int4 --quantize 4bit
 ```
 
@@ -649,12 +648,12 @@ docker run --rm gr00t-mjlab-base:latest bash -c \
 
 ### Q6: INT4 量化需要重新训练吗？
 
-**不需要**。GR00T 项目用的是 **Post-Training Quantization (PTQ)**, 只是把 FP16 权重转换为 INT4 表示, 没有反向传播, **纯转换操作**:
+**不需要**。GR00T 项目用的是 **Post-Training Quantization (PTQ)**, 只是把 BF16 权重转换为 INT4 表示, 没有反向传播, **纯转换操作**:
 
 ```python
 # 伪代码: 量化前后权重等价, 仅存储格式不同
-fp16_weights = load_model()            # 加载训练好的 FP16 模型 (7GB)
-int4_weights = quantize_to_int4(fp16_weights)  # 仅转换 (输出 1.5GB)
+bf16_weights = load_model()            # 加载训练好的 BF16 完整模型 (7GB)
+int4_weights = quantize_to_int4(bf16_weights)  # 仅转换 (输出 1.5GB)
 save(int4_weights)
 ```
 
@@ -663,7 +662,7 @@ save(int4_weights)
 - 耗时 5-15 分钟
 - 量化后模型正好适合 8GB 显存推理
 
-详见上文 [🎯 模型推理: FP16 全量 vs INT4 量化](#-模型推理-fp16-全量-vs-int4-量化) 的 v2 优化版说明。
+详见上文 [🎯 模型推理: BF16 完整模型 vs INT4 量化](#-模型推理-bf16-完整模型-vs-int4-量化) 的 v2 优化版说明。
 
 ---
 

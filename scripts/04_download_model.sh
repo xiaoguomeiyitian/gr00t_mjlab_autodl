@@ -3,7 +3,7 @@
 # 第 4 步: 从 AutoDL 下载训练好的模型到本地 (下载 → 解压 → 验证)
 #
 # 运行环境: 本地
-# 作用: SCP 下载模型包 (FP16 全量 + INT4 量化) → 解压 → 校验
+# 作用: SCP 下载模型包 (BF16 完整模型 + INT4 量化) → 解压 → 校验
 #
 # 前置条件:
 #   - 已填写 scripts/_ssh_config.sh 中的 SSH_HOST / SSH_PORT
@@ -36,7 +36,7 @@ fail()  { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 
 # ── 参数 ────────────────────────────────────────────────────────────────────
 ROBOT="g1"
-PACK_NAME=""               # 主模型包 (FP16 全量)
+PACK_NAME=""               # 主模型包 (BF16 完整模型, 03_autodl_train.sh 输出)
 INT4_PACK=""               # INT4 量化包
 SSH_HOST=""
 SSH_PORT=""
@@ -44,10 +44,10 @@ LOCAL_MODEL_DIR="$PROJECT_ROOT/models"
 EXTRACT_DIR="$PROJECT_ROOT/models"
 SKIP_VERIFY=false
 INCLUDE_INT4=true          # 默认下载 INT4 量化模型
-INCLUDE_FP16=true          # 默认下载 FP16 全量模型
+INCLUDE_FP16=true          # 默认下载 BF16 完整模型
 
 # 默认行为 (v2 优化版):
-#   - FP16 全量模型: 默认下载 (本地需要用于推理/转换)
+#   - BF16 完整模型: 默认下载 (本地需要用于推理/转换)
 #   - INT4 量化模型: 默认不下载 (本地 8GB 显卡可自行量化, 节省下载量)
 # 用 --with-int4 显式启用 INT4 下载 (旧行为, 兼容老用户)
 INCLUDE_INT4=false
@@ -60,7 +60,7 @@ while [[ $# -gt 0 ]]; do
         --pack-name)    PACK_NAME="$2";      shift 2 ;;
         --local-dir)    LOCAL_MODEL_DIR="$2"; shift 2 ;;
         --skip-verify)  SKIP_VERIFY=true;    shift   ;;
-        # 新行为 (默认): 只下载 FP16, INT4 留待本地量化
+        # 新行为 (默认): 只下载 BF16 完整模型, INT4 留待本地量化
         --with-int4)    INCLUDE_INT4=true;   shift   ;;
         --no-int4)      INCLUDE_INT4=false;  shift   ;;   # 兼容别名
         --with-fp16)    INCLUDE_FP16=true;   shift   ;;   # 兼容别名
@@ -76,11 +76,11 @@ while [[ $# -gt 0 ]]; do
 
 如果未传 user@host, 会自动读取 scripts/_ssh_config.sh 中的 SSH_HOST
 
-下载选项 (默认只下载 FP16, 本地自行量化):
+下载选项 (默认只下载 BF16 完整模型, 本地自行量化):
   --with-int4      同时下载云端 INT4 量化包 (~1.5GB)
   --no-int4        不下载 INT4 (默认)
-  --no-fp16        不下载 FP16 全量
-  --with-fp16      下载 FP16 全量 (默认)
+  --no-fp16        不下载 BF16 完整模型
+  --with-fp16      下载 BF16 完整模型 (默认)
 
 其他选项:
   --skip-verify    下载后跳过验证
@@ -91,13 +91,13 @@ while [[ $# -gt 0 ]]; do
   --remote-dir DIR 覆盖云端工作目录
 
 示例:
-  # 推荐: 用 _ssh_config.sh 配置, 只下载 FP16
+  # 推荐: 用 _ssh_config.sh 配置, 只下载 BF16 完整模型
   $0 --robot g1
 
-  # 命令行覆盖, 同时下 FP16 + INT4
+  # 命令行覆盖, 同时下 BF16 + INT4
   $0 root@host -p 12345 --robot g1 --with-int4
 
-  # 只下 INT4 (假定本地已有 FP16)
+  # 只下 INT4 (假定本地已有 BF16 完整模型)
   $0 --robot g1 --no-fp16 --with-int4
 EOF
             exit 0
@@ -123,13 +123,13 @@ fi
 # 端口默认值
 [ -z "$SSH_PORT" ] && SSH_PORT="22"
 
-# 默认包名 (与 02_autodl_train.sh 一致)
+# 默认包名 (与 03_autodl_train.sh 一致)
 [ -z "$PACK_NAME" ] && PACK_NAME="${ROBOT}_gr00t_model.tar.gz"
 [ -z "$INT4_PACK" ] && INT4_PACK="${ROBOT}_gr00t_int4_model.tar.gz"
-# FP16 全量包的别名 (兼容两种命名)
+# BF16 完整模型包的别名 (兼容两种命名)
 FP16_PACK_NAMES=(
-    "${ROBOT}_gr00t_full_fp16.tar.gz"     # 新名称 (02_autodl_train.sh 生成)
-    "${ROBOT}_gr00t_model.tar.gz"         # 别名 (旧名称, 也指向 FP16 全量)
+    "${ROBOT}_gr00t_model.tar.gz"         # 当前名称 (03_autodl_train.sh 生成, BF16 完整模型)
+    "${ROBOT}_gr00t_full_fp16.tar.gz"     # 别名 (03_autodl_train.sh 创建 symlink 指向主包)
 )
 
 if [ -z "$SSH_HOST" ]; then
@@ -155,12 +155,12 @@ info "远端:   $REMOTE_DIR"
 info "机器人: $ROBOT"
 echo ""
 info "下载计划:"
-$INCLUDE_FP16 && echo "  ✓ FP16 全量 (~7GB)  → 默认下载, 本地推理/量化的基础"
-$INCLUDE_FP16 || echo "  ✗ FP16 全量  → 跳过 (--no-fp16)"
+$INCLUDE_FP16 && echo "  ✓ BF16 完整模型 (~7GB)  → 默认下载, 本地推理/量化的基础"
+$INCLUDE_FP16 || echo "  ✗ BF16 完整模型  → 跳过 (--no-fp16)"
 $INCLUDE_INT4  && echo "  ✓ INT4 量化 (~1.5GB) → 云端已量化, 节省本地 GPU 时间"
 $INCLUDE_INT4  || echo "  ✗ INT4 量化  → 跳过 (--with-int4 启用, 或本地 05_local_quantize.sh)"
 echo ""
-$INCLUDE_FP16 && $INCLUDE_INT4 || warn "默认仅下载 FP16. INT4 量化请在本地运行 ./scripts/05_local_quantize.sh"
+$INCLUDE_FP16 && $INCLUDE_INT4 || warn "默认仅下载 BF16 完整模型. INT4 量化请在本地运行 ./scripts/05_local_quantize.sh"
 echo ""
 
 # ── 测试 SSH ────────────────────────────────────────────────────────────────
@@ -188,9 +188,9 @@ for candidate in "${FP16_PACK_NAMES[@]}"; do
 done
 
 if [ -z "$REMOTE_PACK" ]; then
-    fail "未找到 FP16 模型包 (尝试: ${FP16_PACK_NAMES[*]})\n常见路径: $REMOTE_DIR/  /workspace/"
+    fail "未找到 BF16 模型包 (尝试: ${FP16_PACK_NAMES[*]})\n常见路径: $REMOTE_DIR/  /workspace/"
 fi
-info "远端 FP16 模型包: $REMOTE_PACK"
+info "远端 BF16 模型包: $REMOTE_PACK"
 
 REMOTE_SIZE=$(ssh "${SSH_BASE_ARGS[@]}" "$SSH_HOST" "du -h '$REMOTE_PACK' | cut -f1")
 info "远端大小: $REMOTE_SIZE"
@@ -198,15 +198,15 @@ info "远端大小: $REMOTE_SIZE"
 # ── 创建本地目录 ────────────────────────────────────────────────────────────
 mkdir -p "$LOCAL_MODEL_DIR"
 
-# ── 下载 FP16 全量模型 (供高显存 GPU 使用) ──────────────────────────────────
+# ── 下载 BF16 完整模型 (供高显存 GPU 使用) ──────────────────────────────────
 if $INCLUDE_FP16; then
-    step "下载 FP16 全量模型 (供高显存 GPU 使用)..."
+    step "下载 BF16 完整模型 (供高显存 GPU 使用)..."
     LOCAL_PACK="$LOCAL_MODEL_DIR/$REMOTE_PACK_NAME"
     scp "${SCP_ARGS[@]}" "$SSH_HOST:$REMOTE_PACK" "$LOCAL_PACK"
     FP16_SIZE=$(du -h "$LOCAL_PACK" | cut -f1)
-    info "✅ FP16 全量模型已下载: $LOCAL_PACK ($FP16_SIZE)"
+    info "✅ BF16 完整模型已下载: $LOCAL_PACK ($FP16_SIZE)"
 else
-    warn "跳过 FP16 全量模型 (--no-fp16)"
+    warn "跳过 BF16 完整模型 (--no-fp16)"
 fi
 
 # ── 下载 INT4 量化模型 (供低显存 GPU 使用) ─────────────────────────────────
@@ -238,10 +238,10 @@ fi
 step "解压模型..."
 cd "$EXTRACT_DIR"
 
-# ── 解压 FP16 全量模型 ─────────────────────────────────────────────────────
+# ── 解压 BF16 完整模型 ───────────────────────────────────────────────────
 if $INCLUDE_FP16 && [ -f "$REMOTE_PACK_NAME" ]; then
     tar -xzf "$REMOTE_PACK_NAME"
-    info "✅ FP16 模型解压完成: $EXTRACT_DIR/${REMOTE_PACK_NAME%.tar.gz}"
+    info "✅ BF16 完整模型解压完成: $EXTRACT_DIR/${REMOTE_PACK_NAME%.tar.gz}"
 fi
 
 # ── 解压 INT4 量化模型 ─────────────────────────────────────────────────────
@@ -254,14 +254,14 @@ fi
 if ! $SKIP_VERIFY; then
     step "验证模型文件..."
 
-    # 验证 FP16
+    # 验证 BF16
     FP16_DIR="$EXTRACT_DIR/${REMOTE_PACK_NAME%.tar.gz}"
     if $INCLUDE_FP16; then
         if [ ! -d "$FP16_DIR" ]; then
-            fail "FP16 模型目录不存在: $FP16_DIR"
+            fail "BF16 模型目录不存在: $FP16_DIR"
         fi
         FILE_COUNT=$(find "$FP16_DIR" -type f | wc -l)
-        info "✅ FP16 全量模型: $FILE_COUNT 个文件"
+        info "✅ BF16 完整模型: $FILE_COUNT 个文件"
     fi
 
     # 验证 INT4
@@ -279,11 +279,11 @@ fi
 echo ""
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
-echo -e "${GREEN}🎉 第 3 步完成!${NC}"
+echo -e "${GREEN}🎉 第 4 步完成!${NC}"
 echo ""
 echo "已下载模型:"
 $INCLUDE_FP16 && [ -d "${EXTRACT_DIR}/${REMOTE_PACK_NAME%.tar.gz}" ] && \
-    echo "  📦 FP16 全量 (~7GB, 高显存 GPU RTX 4090 24GB+):"
+    echo "  📦 BF16 完整模型 (~7GB, 高显存 GPU RTX 4090 24GB+):"
     echo "     ${EXTRACT_DIR}/${REMOTE_PACK_NAME%.tar.gz}"
 $INCLUDE_INT4 && [ -d "${EXTRACT_DIR}/${INT4_PACK%.tar.gz}" ] && \
     echo "  📦 INT4 量化 (~1.5GB, 低显存 GPU RTX 2080 8GB):"
@@ -298,10 +298,10 @@ if $INCLUDE_FP16 && ! $INCLUDE_INT4; then
     echo ""
 fi
 
-echo "进入第 4 步 (本地推理验证):"
-echo "  ./scripts/04_local_verify.sh --robot $ROBOT"
+echo "进入第 6 步 (本地推理验证):"
+echo "  ./scripts/06_local_verify.sh --robot $ROBOT"
 echo ""
 echo "💡 提示:"
-echo "  - 高显存 GPU (≥24GB): 使用 FP16 全量模型推理质量更高"
+echo "  - 高显存 GPU (≥24GB): 使用 BF16 完整模型推理质量更高"
 echo "  - 低显存 GPU (≤12GB): 使用 INT4 量化模型"
 echo ""
