@@ -40,6 +40,67 @@ G1_JOINT_NAMES = [
 G1_STATE_DIM = G1_NUM_JOINTS * 2 + 3 + 4 + 3 + 3  # = 71
 G1_ACTION_DIM = G1_NUM_JOINTS  # = 29
 
+# ── 23Dof 变种配置 (Unitree-G1-23Dof-Flat/Rough) ───────────────────────────
+# 与 unitree_rl_mjlab/src/assets/robots/unitree_g1/xmls/g1_23dof.xml 一致
+# 关节差异: 23Dof 砍掉了 waist_roll/waist_pitch/4 个 wrist_pitch/wrist_yaw (共 6 个)
+# 顺序与 MJCF <joint> 出现顺序一致
+G1_23DOF_NUM_JOINTS = 23
+
+G1_23DOF_JOINT_NAMES = [
+    # 左腿 (6)
+    "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint",
+    "left_knee_joint", "left_ankle_pitch_joint", "left_ankle_roll_joint",
+    # 右腿 (6)
+    "right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint",
+    "right_knee_joint", "right_ankle_pitch_joint", "right_ankle_roll_joint",
+    # 腰部 (1, 只剩 waist_yaw)
+    "waist_yaw_joint",
+    # 左臂 (5, 无 wrist_pitch/wrist_yaw)
+    "left_shoulder_pitch_joint", "left_shoulder_roll_joint",
+    "left_shoulder_yaw_joint", "left_elbow_joint",
+    "left_wrist_roll_joint",
+    # 右臂 (5)
+    "right_shoulder_pitch_joint", "right_shoulder_roll_joint",
+    "right_shoulder_yaw_joint", "right_elbow_joint",
+    "right_wrist_roll_joint",
+]
+assert len(G1_23DOF_JOINT_NAMES) == 23
+
+G1_23DOF_STATE_DIM = G1_23DOF_NUM_JOINTS * 2 + 3 + 4 + 3 + 3  # = 23*2+13 = 59
+G1_23DOF_DT = 0.02
+
+# 23Dof HOME_KEYFRAME (from g1_23dof_constants.py:179-191)
+# 原配置用 regex 匹配, 实际值:
+#   hip_pitch → -0.1, knee → 0.3, ankle_pitch → -0.2
+#   shoulder_pitch → 0.35, elbow → 0.87
+#   left_shoulder_roll → 0.18, right_shoulder_roll → -0.18
+#   其余 (hip_roll/hip_yaw/ankle_roll/waist_yaw/shoulder_yaw/wrist_roll) → 0.0
+G1_23DOF_DEFAULT_JOINT_ANGLES = {
+    "left_hip_pitch_joint": -0.1,
+    "left_hip_roll_joint": 0.0,
+    "left_hip_yaw_joint": 0.0,
+    "left_knee_joint": 0.3,
+    "left_ankle_pitch_joint": -0.2,
+    "left_ankle_roll_joint": 0.0,
+    "right_hip_pitch_joint": -0.1,
+    "right_hip_roll_joint": 0.0,
+    "right_hip_yaw_joint": 0.0,
+    "right_knee_joint": 0.3,
+    "right_ankle_pitch_joint": -0.2,
+    "right_ankle_roll_joint": 0.0,
+    "waist_yaw_joint": 0.0,
+    "left_shoulder_pitch_joint": 0.35,
+    "left_shoulder_roll_joint": 0.18,
+    "left_shoulder_yaw_joint": 0.0,
+    "left_elbow_joint": 0.87,
+    "left_wrist_roll_joint": 0.0,
+    "right_shoulder_pitch_joint": 0.35,
+    "right_shoulder_roll_joint": -0.18,
+    "right_shoulder_yaw_joint": 0.0,
+    "right_elbow_joint": 0.87,
+    "right_wrist_roll_joint": 0.0,
+}
+
 # ── 动作空间选项 ──────────────────────────────────────────────────────────
 # - "absolute": 关节目标绝对位置 (rad), 直接可喂 mjlab JointPositionActionCfg
 # - "delta":    关节目标相对当前位置的增量 (rad), GR00T N1.7 推荐

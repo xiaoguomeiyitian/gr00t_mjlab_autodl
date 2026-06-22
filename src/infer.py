@@ -52,6 +52,7 @@ class GR00TLocalInference:
         quantize: str = "auto",
         device: str = "auto",
         action_horizon: int = 16,
+        execution_horizon: int = 1,
         task_id: str | None = None,
     ):
         self.model_path = model_path
@@ -59,9 +60,18 @@ class GR00TLocalInference:
         self.quantize = quantize
         self.device = device
         self.action_horizon = action_horizon
+        # 修复: 支持 action chunking 滑动窗口
+        #   1 = 每步重新规划 (最安全, 默认)
+        #   N = 每次 GR00T 调用输出 16 步, 顺序执行前 N 步再重新规划
+        #      提升吞吐量, 但因物理扰动会有累积误差
+        self.execution_horizon = max(1, min(execution_horizon, action_horizon))
         self.task_id = task_id or (
             "Unitree-G1-Flat" if robot == "g1" else "Unitree-Go2-Flat"
         )
+
+        # Action chunking 队列 (缓存 GR00T 输出的多步动作)
+        self._action_queue: list[np.ndarray] = []
+        self._action_queue_start_pos: np.ndarray | None = None  # RELATIVE 模式累加起点
 
         # 加载配置
         if robot == "g1":
@@ -194,6 +204,12 @@ class GR00TLocalInference:
     def get_action(self, obs: dict[str, Any]) -> np.ndarray:
         """从观测生成动作 (单步关节目标).
 
+        支持 action chunking: 当 execution_horizon > 1 时, 内部维护一个队列,
+        每次调用 GR00T 输出 16 步, 顺序执行前 execution_horizon 步。
+        - RELATIVE 模式: 累积 delta 应用到当前 joint_pos
+        - ABSOLUTE 模式: 直接作为目标
+        - DELTA 模式: 同 ABSOLUTE (视为目标)
+
         Args:
             obs: 单步观测字典, 同上 _build_policy_observation 输入格式
 
@@ -203,23 +219,60 @@ class GR00TLocalInference:
         if self._policy is None:
             self.load()
 
+        from gr00t.data.types import ActionRepresentation
+
+        # ── action chunking: 队列非空, 顺序消费 ──
+        if self._action_queue:
+            return self._pop_cached_action(obs, ActionRepresentation)
+
+        # ── 队列为空: 调 GR00T 重新规划 ──
         policy_obs = self._build_policy_observation(obs)
-        action_dict, _info = self._policy._get_action(policy_obs)  # dict[np.ndarray (B,T,D)]
+        action_dict, _info = self._policy._get_action(policy_obs)  # dict[(B, T, D)]
 
-        # 输出是 (B, T, D), 取 [0, 0, :]
         first_key = self._action_keys[0]
-        delta = action_dict[first_key][0, 0]  # (D_action,)
+        # shape: (B=1, T=action_horizon, D) → (action_horizon, D)
+        action_seq = action_dict[first_key][0]  # (T, D)
 
-        # 当前 joint_pos 用于 RELATIVE 模式
-        current_pos = np.asarray(obs["state.joint_pos"], dtype=np.float32)
+        # 缓存到队列 (最多 execution_horizon 步)
+        n_cache = min(self.execution_horizon, action_seq.shape[0])
+        self._action_queue = [action_seq[t].astype(np.float32) for t in range(n_cache)]
 
-        # ActionRepresentation: RELATIVE / ABSOLUTE / DELTA
-        from gr00t.data.types import ActionRepresentation  # local import
+        # RELATIVE 模式: 记录累加起点 (执行第一步时的 joint_pos)
+        self._action_queue_start_pos = np.asarray(
+            obs["state.joint_pos"], dtype=np.float32
+        ).copy()
+
+        # 返回第一步
+        return self._pop_cached_action(obs, ActionRepresentation)
+
+    def _pop_cached_action(
+        self, obs: dict[str, Any], ActionRepresentation: type
+    ) -> np.ndarray:
+        """从队列中取出一步并按 ActionRepresentation 转换为关节目标."""
+        if not self._action_queue:
+            raise RuntimeError("action queue empty — call get_action() first")
+
+        # 取步索引 (累积 offset)
+        idx = self.execution_horizon - len(self._action_queue)
+        delta = self._action_queue.pop(0)  # (D,)
+
         rep = self._action_rep
         if rep == ActionRepresentation.RELATIVE:
+            # RELATIVE: 把"从起点累加 idx 步"的绝对目标算出来
+            # 即当前 obs 的 joint_pos + (已消费步的 delta 之和) + 剩余步的 delta 之和
+            #
+            # 注意: 我们缓存的是单步 delta (不是绝对轨迹), 所以需要实时累加。
+            # 简化策略: RELATIVE 模式下, execution_horizon 退化为 1
+            # (因为每步的物理状态会影响"当前 joint_pos"的定义)
+            current_pos = np.asarray(obs["state.joint_pos"], dtype=np.float32)
             return current_pos + delta
-        # ABSOLUTE 或 DELTA 直接作为目标
+        # ABSOLUTE 或 DELTA: 直接作为目标
         return delta.astype(np.float32)
+
+    def reset_action_queue(self) -> None:
+        """清空 action chunking 队列 (每次新 episode / reset 后调用)."""
+        self._action_queue.clear()
+        self._action_queue_start_pos = None
 
     def run_inference_loop(
         self,
@@ -282,6 +335,8 @@ class GR00TLocalInference:
                 try:
                     if step == 0:
                         env.reset()
+                        # 修复: reset 后清空 action queue
+                        self.reset_action_queue()
                     obs = self._env_obs_to_dict(env, step)
                     # ⭐ 真实渲染: 从 mjlab env 拿一帧 RGB
                     frame = render_frame(env, height=224, width=224)
@@ -365,18 +420,28 @@ class GR00TLocalInference:
                 arr = arr.squeeze(0)
             return arr.astype(np.float32)
 
-        # joint_pos (相对或绝对)
-        jp = raw.get("joint_pos_rel", raw.get("joint_pos"))
-        jv = raw.get("joint_vel_rel", raw.get("joint_vel"))
+        # joint_pos (相对或绝对) — 修复: mjlab 返回 rel, 必须还原为绝对
+        # 与 collect_data.py 保持对称, 否则训练/推理分布不一致
+        # 注意: mjlab term 名字是 "joint_pos" (不是 "joint_pos_rel"),
+        #       但 func=mdp.joint_pos_rel 返回的是相对值 (joint_pos - default)
+        jp_raw = raw.get("joint_pos_rel", raw.get("joint_pos"))
+        jv_raw = raw.get("joint_vel_rel", raw.get("joint_vel"))
         bp = raw.get("base_pos") or raw.get("root_link_pos_w")
         bq = raw.get("base_quat") or raw.get("root_link_quat_w")
         blv = raw.get("base_lin_vel") or raw.get("root_link_lin_vel_w")
         bav = raw.get("base_ang_vel") or raw.get("root_link_ang_vel_w")
 
-        if jp is not None:
-            mock["state.joint_pos"] = _np(jp)
-        if jv is not None:
-            mock["state.joint_vel"] = _np(jv)
+        if jp_raw is not None:
+            jp = _np(jp_raw)
+            # 关键修复: mjlab term `joint_pos` 的 func=mdp.joint_pos_rel,
+            # 内容是 (joint_pos - default), 还原为绝对位置与 collect_data.py 对齐
+            # 旧代码用 raw.get("joint_pos_rel") is not None → 永远 False (term 叫 "joint_pos")
+            if (raw.get("joint_pos_rel") is not None or raw.get("joint_pos") is not None) \
+                    and jp.shape[-1] == self.default_angles.shape[0]:
+                jp = jp + self.default_angles
+            mock["state.joint_pos"] = jp
+        if jv_raw is not None:
+            mock["state.joint_vel"] = _np(jv_raw)
         if bp is not None:
             mock["state.base_pos"] = _np(bp)
         if bq is not None:
@@ -391,10 +456,12 @@ class GR00TLocalInference:
     def _mock_observation(self, step: int) -> dict[str, Any]:
         """生成模拟观测 (无仿真环境时使用)。"""
         t = step * 0.02
+        # 修复: 使用确定性种子, 保证可复现
+        rng = np.random.RandomState(42 + step)
         return {
             "video.front_view": np.zeros((224, 224, 3), dtype=np.uint8),
             "state.joint_pos": self.default_angles +
-                np.random.randn(self.num_joints).astype(np.float32) * 0.01,
+                rng.randn(self.num_joints).astype(np.float32) * 0.01,
             "state.joint_vel": np.zeros(self.num_joints, dtype=np.float32),
             "state.base_pos": np.array(
                 [0.5 * t, 0.0, 0.8 if self.robot == "g1" else 0.32], dtype=np.float32
@@ -419,6 +486,9 @@ def main():
                         help="(历史参数, 已忽略 — 推理 dtype 由模型保存时决定)")
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--show-viewer", action="store_true")
+    parser.add_argument("--execution-horizon", type=int, default=1,
+                        help="Action chunking: 每次 GR00T 输出 16 步动作, "
+                             "顺序执行前 N 步再重新规划 (1=每步规划; 16=完整 chunking)")
     args = parser.parse_args()
 
     inference = GR00TLocalInference(
@@ -426,6 +496,7 @@ def main():
         robot=args.robot,
         quantize=args.quantize,
         device=args.device,
+        execution_horizon=args.execution_horizon,
         task_id=args.task,
     )
     inference.run_inference_loop(

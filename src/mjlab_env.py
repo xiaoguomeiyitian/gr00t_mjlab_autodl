@@ -21,47 +21,28 @@ def get_per_key_obs(env_raw: Any) -> dict[str, Any]:
     """从 unitree_rl_mjlab ManagerBasedRlEnv 取 per-key 观测 (dict[str, tensor]).
 
     mjlab env.step() 返回的 obs 是按 actor/critic 拼接的 tensor,
-    这里通过 observation_manager.compute() + Entity.data 拿分组前的 dict。
+    这里通过 Entity.data 拿分组前的 dict (因为 mjlab ObservationManager
+    默认 concatenate_terms=True, 没有直接 per-key 访问接口).
+
+    修复: 删除对 om.terms / om._terms 的尝试 (mjlab ObservationManager
+         无此属性, 这些行是死代码; 直接走 Entity.data 兜底即可).
     """
     out: dict[str, Any] = {}
-    # 1) 尝试从 observation_manager.terms 拿 per-key tensor
-    try:
-        om = env_raw.unwrapped.observation_manager
-        for getter_name in ("terms", "_terms"):
-            terms = getattr(om, getter_name, None)
-            if not terms:
-                continue
-            for group_name, group_terms in terms.items():
-                if not isinstance(group_terms, dict):
-                    continue
-                for term_name, term in group_terms.items():
-                    data = getattr(term, "data", None)
-                    if data is None:
-                        continue
-                    if hasattr(data, "squeeze"):
-                        out[term_name] = data
-            break
-    except Exception as e:
-        logger.debug("observation_manager.terms 失败: %s", e)
-
-    # 2) 兜底: 从 robot Entity.data 拿 base / joint 状态
+    # 直接从 robot Entity.data 拿 base / joint 状态 (mjlab 唯一稳定的接口)
     try:
         robot = env_raw.unwrapped.scene["robot"]
         rd = robot.data
-        if "base_pos" not in out and getattr(rd, "root_link_pos_w", None) is not None:
-            out["base_pos"] = rd.root_link_pos_w
-        if "base_quat" not in out and getattr(rd, "root_link_quat_w", None) is not None:
-            out["base_quat"] = rd.root_link_quat_w
-        if "base_lin_vel" not in out and getattr(rd, "root_link_lin_vel_w", None) is not None:
-            out["base_lin_vel"] = rd.root_link_lin_vel_w
-        if "base_ang_vel" not in out and getattr(rd, "root_link_ang_vel_w", None) is not None:
-            out["base_ang_vel"] = rd.root_link_ang_vel_w
-        if "joint_pos" not in out and getattr(rd, "joint_pos", None) is not None:
-            out["joint_pos"] = rd.joint_pos
-        if "joint_vel" not in out and getattr(rd, "joint_vel", None) is not None:
-            out["joint_vel"] = rd.joint_vel
+        # base pose/velocity (mjlab root_link_* 字段, shape (num_envs, D))
+        out["base_pos"] = rd.root_link_pos_w
+        out["base_quat"] = rd.root_link_quat_w
+        out["base_lin_vel"] = rd.root_link_lin_vel_w
+        out["base_ang_vel"] = rd.root_link_ang_vel_w
+        # joint (mjlab Entity.data.joint_pos 是绝对位置, 但 mjlab term `joint_pos`
+        #        func=mdp.joint_pos_rel 返回的是 rel; 我们直接用 Entity.data 绝对)
+        out["joint_pos"] = rd.joint_pos
+        out["joint_vel"] = rd.joint_vel
     except Exception as e:
-        logger.debug("Entity.data 兜底失败: %s", e)
+        logger.debug("Entity.data 失败: %s", e)
 
     return out
 
@@ -99,20 +80,19 @@ def render_frame(env_raw: Any, height: int = 224, width: int = 224) -> np.ndarra
             return arr
     except Exception:
         pass
-    # 方案 2: mjlab sim 内部 mujoco native
+    # 方案 2: mjlab sim.mj_data + mujoco.Renderer (兜底)
     try:
         sim = env_raw.unwrapped.sim
-        model = getattr(sim, "_model", None) or getattr(sim, "model", None)
-        data = getattr(sim, "_data", None) or getattr(sim, "data", None)
-        if model is not None and data is not None:
-            import mujoco  # noqa
-            from mujoco import Renderer
-            viewer_cfg = env_raw.unwrapped.cfg.viewer
-            camera_name = getattr(viewer_cfg, "camera_name", -1)
-            renderer = Renderer(height=height, width=width)
-            renderer.update_scene(data, camera=camera_name)
-            frame = renderer.render()
-            return np.asarray(frame).astype(np.uint8)
+        mj_model = sim.mj_model
+        mj_data = sim.mj_data
+        import mujoco  # noqa
+        from mujoco import Renderer
+        viewer_cfg = env_raw.unwrapped.cfg.viewer
+        camera_name = getattr(viewer_cfg, "camera_name", -1)
+        renderer = Renderer(model=mj_model, height=height, width=width)
+        renderer.update_scene(mj_data, camera=camera_name)
+        frame = renderer.render()
+        return np.asarray(frame).astype(np.uint8)
     except Exception as e:
         logger.debug("mjlab sim.render 失败: %s", e)
     return None
@@ -136,7 +116,17 @@ def load_ppo_policy(env_raw: Any, task_id: str, checkpoint_path: str,
     env_wrapped = RslRlVecEnvWrapper(env_raw, clip_actions=agent_cfg.clip_actions)
 
     runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
-    runner = runner_cls(env_wrapped, agent_cfg, device=device)
+    # 修复: MjlabOnPolicyRunner.__init__(env, train_cfg: dict, log_dir=None, device='cpu')
+    #   train_cfg 必须是 dict, 而 RslRlBaseRunnerCfg 是 frozen dataclass — 必须 asdict 转换
+    #   旧代码直接传 dataclass 对象 → OnPolicyRunner 内部 .items() 会失败
+    try:
+        from dataclasses import asdict
+        train_cfg_dict = asdict(agent_cfg)
+    except Exception:
+        # 兜底: 手动 __dict__ 拷贝
+        train_cfg_dict = {k: v for k, v in vars(agent_cfg).items()
+                          if not k.startswith("_")}
+    runner = runner_cls(env_wrapped, train_cfg_dict, log_dir=None, device=device)
     runner.load(checkpoint_path, load_cfg={"actor": True}, strict=True, map_location=device)
     return runner.get_inference_policy(device=device)
 

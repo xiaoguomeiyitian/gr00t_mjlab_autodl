@@ -61,6 +61,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import shutil
 import sys
 from pathlib import Path
@@ -457,10 +458,18 @@ def convert(
             logger.warning("Episode %d 缺 observations/actions, 跳过", ep_idx)
             continue
 
+        # 修复: n_steps 优先级应为 observations > actions > rewards
+        #   - observations 是关键 (决定 parquet 写入多少 frame)
+        #   - actions 是次优 (理论上应与 observations 同长)
+        #   - rewards 仅辅助 (旧代码用 rewards 优先, 错)
         if isinstance(observations, list):
             n_steps = len(observations)
+        elif isinstance(actions, list):
+            n_steps = len(actions)
+        elif rewards is not None:
+            n_steps = len(rewards)
         else:
-            n_steps = len(rewards) if rewards is not None else len(actions)
+            n_steps = 0
 
         for step_idx in range(n_steps):
             obs_raw = observations[step_idx]
@@ -590,13 +599,18 @@ def convert(
 
     fps_value = video_fps if has_video else int(round(1.0 / metadata.get("dt", 0.02)))
 
+    # 修复: total_chunks 应根据实际 chunk 数计算 (CHUNKS_SIZE=1000, 大数据集可能多 chunk)
+    total_chunks = max(
+        1, math.ceil(len(episode_metadata) / CHUNKS_SIZE)
+    )
+
     info: dict[str, Any] = {
         "codebase_version":   LEROBOT_CODEBASE_VERSION,
         "robot_type":         robot.upper(),
         "total_episodes":     len(episode_metadata),
         "total_frames":       len(data_records),
         "total_tasks":        len(tasks_list),
-        "total_chunks":       1,                  # 当前 1 个 chunk 目录 (chunks_size=1000 控制多 chunk)                  # 与官方 demo 一致 (当 chunks_size=1000 时)
+        "total_chunks":       total_chunks,
         "total_videos":       len(episodes) if has_video else 0,
         "chunks_size":        CHUNKS_SIZE,
         "fps":                fps_value,

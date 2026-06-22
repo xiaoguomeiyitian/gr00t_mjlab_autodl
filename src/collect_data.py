@@ -108,32 +108,46 @@ def gait_generator_g1(
     dt: float = 0.02,
     speed: float = 0.5,
     command: str = "walk forward",
+    num_joints: int = 29,
 ) -> np.ndarray:
-    """G1 步态生成器 — 产生 29 维关节目标。
+    """G1 步态生成器 — 产生 29 维 (默认) 或 23 维关节目标。
 
+    修复: 支持 23Dof 变种 (Unitree-G1-23Dof-Flat/Rough)
     简单正弦步态: 双腿交替迈步，手臂自然摆动，腰部保持平衡。
-    关节顺序与 unitree_rl_mjlab MJCF (g1.xml) 一致。
+    关节顺序与 unitree_rl_mjlab MJCF (g1.xml / g1_23dof.xml) 一致。
 
     Args:
         step_idx: 当前时间步
         dt: 时间步长 (秒)
         speed: 行走速度 (影响步频)
         command: 语言指令 (影响方向)
+        num_joints: 关节数 (29 = 完整, 23 = 23Dof 变种)
 
     Returns:
-        joint_targets: (29,) float32, 关节目标位置 (rad)
+        joint_targets: (num_joints,) float32, 关节目标位置 (rad)
     """
     t = step_idx * dt
     freq = speed * 2.0  # 步频
 
-    # 默认站立姿态 (HOME_KEYFRAME from unitree_rl_mjlab)
-    targets = np.array([
-        -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,        # 左腿
-        -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,        # 右腿
-        0.0, 0.0, 0.0,                            # 腰部
-        0.35, 0.18, 0.0, 0.87, 0.0, 0.0, 0.0,   # 左臂
-        0.35, -0.18, 0.0, 0.87, 0.0, 0.0, 0.0,  # 右臂
-    ], dtype=np.float32)
+    if num_joints == 23:
+        # 23Dof: 无 waist_roll/waist_pitch, 无 wrist_pitch/wrist_yaw
+        # 顺序: 6 左腿 + 6 右腿 + 1 腰 + 5 左臂 + 5 右臂
+        targets = np.array([
+            -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,        # 左腿 (6)
+            -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,        # 右腿 (6)
+            0.0,                                      # waist_yaw (1)
+            0.35, 0.18, 0.0, 0.87, 0.0,             # 左臂 (5, 无 wrist_pitch/yaw)
+            0.35, -0.18, 0.0, 0.87, 0.0,            # 右臂 (5)
+        ], dtype=np.float32)
+    else:
+        # 29Dof: 完整 (default)
+        targets = np.array([
+            -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,        # 左腿
+            -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,        # 右腿
+            0.0, 0.0, 0.0,                            # 腰部
+            0.35, 0.18, 0.0, 0.87, 0.0, 0.0, 0.0,   # 左臂
+            0.35, -0.18, 0.0, 0.87, 0.0, 0.0, 0.0,  # 右臂
+        ], dtype=np.float32)
 
     # 左腿 (0-5): hip_pitch, hip_roll, hip_yaw, knee, ankle_pitch, ankle_roll
     phase_l = np.sin(2 * np.pi * freq * t)
@@ -147,17 +161,23 @@ def gait_generator_g1(
     targets[7] += 0.05 * np.sin(phase_r)
     targets[9] += -0.4 * max(phase_r, 0)
 
-    # 腰部 (12-14): 保持平衡
-    targets[13] += 0.02 * np.sin(2 * np.pi * freq * t)
+    # 腰部 (12 或 12-14)
+    if num_joints == 23:
+        # 23Dof: 只有 waist_yaw, 不做腰部运动
+        pass
+    else:
+        targets[13] += 0.02 * np.sin(2 * np.pi * freq * t)  # waist_pitch 微动
 
-    # 左臂 (15-21): 自然摆动
+    # 左臂: 23Dof 起始 idx=13, 29Dof 起始 idx=15
+    arm_l_start = 13 if num_joints == 23 else 15
+    # 右臂: 23Dof 起始 idx=18, 29Dof 起始 idx=22
+    arm_r_start = 18 if num_joints == 23 else 22
+
     arm_phase = np.sin(2 * np.pi * freq * t)
-    targets[15] += 0.2 * arm_phase           # shoulder_pitch
-    targets[18] += -0.1 * max(arm_phase, 0)  # elbow
-
-    # 右臂 (22-28): 相位差 π
-    targets[22] += 0.2 * (-arm_phase)
-    targets[25] += -0.1 * max(-arm_phase, 0)
+    targets[arm_l_start] += 0.2 * arm_phase           # shoulder_pitch
+    targets[arm_l_start + 3] += -0.1 * max(arm_phase, 0)  # elbow
+    targets[arm_r_start] += 0.2 * (-arm_phase)
+    targets[arm_r_start + 3] += -0.1 * max(-arm_phase, 0)
 
     return targets
 
@@ -167,6 +187,7 @@ def gait_generator_go2(
     dt: float = 0.02,
     speed: float = 0.5,
     command: str = "walk forward",
+    **kwargs,  # 兼容 num_joints 参数
 ) -> np.ndarray:
     """Go2 步态生成器 — 产生 12 维关节目标。
 
@@ -202,9 +223,38 @@ def gait_generator_go2(
     return targets
 
 
+def gait_generator_generic(
+    step_idx: int,
+    dt: float = 0.02,
+    speed: float = 0.5,
+    command: str = "walk forward",
+    num_joints: int = 12,
+    default_angles: np.ndarray | None = None,
+) -> np.ndarray:
+    """通用脚本化步态 — 用于没有专门生成器的机器人 (A2/R1/H1_2/H2/As2).
+
+    简单策略: 在 default 姿态上叠加正弦扰动, 用于 smoke test
+    真实训练数据请用 --agent trained + PPO checkpoint
+    """
+    if default_angles is None:
+        targets = np.zeros(num_joints, dtype=np.float32)
+    else:
+        targets = default_angles.copy()
+    t = step_idx * dt
+    freq = speed * 1.5
+    for i in range(num_joints):
+        targets[i] += 0.1 * np.sin(2 * np.pi * freq * t + i * 0.3)
+    return targets
+
+
 GAIT_GENERATORS = {
     "g1": gait_generator_g1,
     "go2": gait_generator_go2,
+    "a2": gait_generator_generic,
+    "as2": gait_generator_generic,
+    "r1": gait_generator_generic,
+    "h1_2": gait_generator_generic,
+    "h2": gait_generator_generic,
 }
 
 
@@ -212,15 +262,32 @@ GAIT_GENERATORS = {
 # 任务 ID → 机器人类型映射
 # ──────────────────────────────────────────────────────────────────────────────
 
+# 修复: 对齐 unitree_rl_mjlab 实际注册的任务 ID
+#   (src/tasks/velocity/config/{g1,go2,a2,r1,h1_2,h2,as2,g1_23dof}/__init__.py)
 TASK_TO_ROBOT: dict[str, str] = {
+    # G1 (29 自由度 + 23 自由度)
     "Unitree-G1-Flat": "g1",
     "Unitree-G1-Rough": "g1",
     "Unitree-G1-23Dof-Flat": "g1",
+    "Unitree-G1-23Dof-Rough": "g1",
+    # Go2 (12 自由度)
     "Unitree-Go2-Flat": "go2",
     "Unitree-Go2-Rough": "go2",
+    # A2 (四足)
     "Unitree-A2-Flat": "a2",
+    "Unitree-A2-Rough": "a2",
+    # R1 (人形)
     "Unitree-R1-Flat": "r1",
+    "Unitree-R1-Rough": "r1",
+    # H1_2 (人形)
     "Unitree-H1_2-Flat": "h1_2",
+    "Unitree-H1_2-Rough": "h1_2",
+    # H2 (人形, 修复: 之前缺失)
+    "Unitree-H2-Flat": "h2",
+    "Unitree-H2-Rough": "h2",
+    # As2 (注意: 是 As2 不是 A2, 修复: 之前缺失)
+    "Unitree-As2-Flat": "as2",
+    "Unitree-As2-Rough": "as2",
 }
 
 
@@ -302,6 +369,7 @@ def collect_demonstrations(
     instruction_pool: list[str] | None = None,
     viser: bool = False,  # 在浏览器里看数据采集进度 (默认关, 需 pip install viser)
     viser_port: int = 8080,
+    ee_body: str | None = None,  # relative_eef 模式下的末端 body 名 (默认 G1: left_rubber_hand)
 ) -> str:
     """在 unitree_rl_mjlab 仿真环境中收集机器人演示数据。
 
@@ -362,20 +430,43 @@ def collect_demonstrations(
     if robot == "g1":
         from configs.g1_config import (
             G1_NUM_JOINTS, G1_DEFAULT_JOINT_ANGLES, G1_DT, G1_JOINT_NAMES,
+            G1_23DOF_NUM_JOINTS, G1_23DOF_DEFAULT_JOINT_ANGLES,
+            G1_23DOF_JOINT_NAMES, G1_23DOF_DT,
         )
-        num_joints = G1_NUM_JOINTS
-        default_angles = np.array(
-            [G1_DEFAULT_JOINT_ANGLES[n] for n in G1_JOINT_NAMES], dtype=np.float32
-        )
-        dt = G1_DT
+        # 修复: 23Dof 变种 (Unitree-G1-23Dof-Flat/Rough) 关节数是 23 不是 29
+        is_23dof = "23Dof" in task_id
+        if is_23dof:
+            num_joints = G1_23DOF_NUM_JOINTS
+            default_angles = np.array(
+                [G1_23DOF_DEFAULT_JOINT_ANGLES[n] for n in G1_23DOF_JOINT_NAMES],
+                dtype=np.float32,
+            )
+            dt = G1_23DOF_DT
+        else:
+            num_joints = G1_NUM_JOINTS
+            default_angles = np.array(
+                [G1_DEFAULT_JOINT_ANGLES[n] for n in G1_JOINT_NAMES],
+                dtype=np.float32,
+            )
+            dt = G1_DT
     else:
-        from configs.go2_config import (
-            GO2_NUM_JOINTS, GO2_DEFAULT_JOINT_ANGLES, GO2_DT, GO2_JOINT_NAMES,
-        )
-        num_joints = GO2_NUM_JOINTS
-        default_angles = np.array(
-            [GO2_DEFAULT_JOINT_ANGLES[n] for n in GO2_JOINT_NAMES], dtype=np.float32
-        )
+        # 修复: 非 G1 机器人 (Go2/A2/As2/R1/H1_2/H2) 的 num_joints
+        # 从 unitree_rl_mjlab MJCF 统计 (4足 ~12, 人形 24-30)
+        from configs.go2_config import GO2_NUM_JOINTS, GO2_DT
+        # 关节数查表 (来源: unitree_rl_mjlab/src/assets/robots/*/xmls/*.xml)
+        robot_joint_counts = {
+            "go2": 12,    # go2.xml: 12 joints
+            "a2":  12,    # a2.xml: 12 joints (四足)
+            "as2": 12,    # as2.xml: 12 joints
+            "r1":  24,    # r1.xml: 24 joints (人形)
+            "h1_2": 27,   # h1_2.xml: 27 joints
+            "h2":  29,    # h2.xml: 29 joints (近似, 实际可能有 free-joint 折算)
+        }
+        num_joints = robot_joint_counts.get(robot, GO2_NUM_JOINTS)
+        # 通用 default_angles: 全 0 (mjlab reset 时会用实际 HOME_KEYFRAME 覆盖)
+        # 注意: 脚本化步态的初始姿态是 0, mjlab 接管后会用 entity 的 default_joint_pos
+        # 对于 random/zero agent, 不需要 default_angles
+        default_angles = np.zeros(num_joints, dtype=np.float32)
         dt = GO2_DT
 
     gait_fn = GAIT_GENERATORS.get(robot)
@@ -405,6 +496,7 @@ def collect_demonstrations(
     env_wrapped = None  # RslRlVecEnvWrapper (供 PPO policy 使用)
     policy_fn: Callable | None = None  # trained 模式下: (obs) → action tensor
     use_mjlab = False
+    viewer = None  # 修复: 提前初始化, 避免 mjlab 失败时 UnboundLocalError
 
     try:
         # unitree_rl_mjlab 通过 mjlab.tasks.registry 加载任务
@@ -472,7 +564,14 @@ def collect_demonstrations(
             except KeyError:
                 runner_cls = None
             runner_cls = runner_cls or MjlabOnPolicyRunner
-            runner = runner_cls(env_wrapped, _asdict_safe(agent_cfg), device=device)
+            # 修复: 统一用 dataclasses.asdict 转换 (兼容 frozen dataclass)
+            # 旧 _asdict_safe 在递归时可能漏字段, asdict 才是 mjlab 官方推荐的写法
+            from dataclasses import asdict
+            try:
+                train_cfg_dict = asdict(agent_cfg)
+            except Exception:
+                train_cfg_dict = _asdict_safe(agent_cfg)
+            runner = runner_cls(env_wrapped, train_cfg_dict, log_dir=None, device=device)
             runner.load(str(checkpoint), load_cfg={"actor": True}, strict=True,
                         map_location=device)
             policy_fn = runner.get_inference_policy(device=device)
@@ -529,6 +628,15 @@ def collect_demonstrations(
         video_width = video_width or GO2_VIDEO_WIDTH
         video_key = GO2_VIDEO_KEY
 
+    # relative_eef 模式的 EE body 名 (修复: 不再 hard-code 零向量)
+    action_mode_ee_body = ee_body  # None 时 G1 默认 "left_rubber_hand", Go2 不支持
+    if action_mode == "relative_eef" and robot != "g1":
+        logger.warning("relative_eef 模式仅 G1 有末端执行器, Go2 数据将为零 (用于调试)")
+    elif action_mode == "relative_eef" and action_mode_ee_body is None:
+        action_mode_ee_body = "left_rubber_hand"
+        logger.info("relative_eef 模式默认 EE body: %s (可用 --ee-body 覆盖)",
+                    action_mode_ee_body)
+
     for ep in range(num_episodes):
         ep_speed = speed * rng.uniform(0.8, 1.2)
         ep_instruction = instruction_pool[ep % len(instruction_pool)]
@@ -548,6 +656,9 @@ def collect_demonstrations(
             except Exception as e:
                 logger.debug("reset 失败 (ep %d): %s", ep, e)
 
+        # ─── 状态变量: 上一时刻 EE 位姿, 用于 relative_eef 计算 delta ──
+        prev_ee_pose: np.ndarray | None = None
+
         observations = []
         actions = []
         rewards = []
@@ -556,8 +667,17 @@ def collect_demonstrations(
         for step_idx in range(episode_length):
             # ─── 1) 决定动作 ─────────────────────────────────────
             if agent == "scripted":
-                joint_targets = gait_fn(step_idx, dt=dt, speed=ep_speed,
-                                        command=ep_instruction)
+                # 修复: 23Dof 变种需要传 num_joints=23 给 gait_generator
+                if robot == "g1":
+                    joint_targets = gait_fn(step_idx, dt=dt, speed=ep_speed,
+                                            command=ep_instruction,
+                                            num_joints=num_joints)
+                else:
+                    # 通用步态 (A2/As2/R1/H1_2/H2 + Go2): 不传 default_angles
+                    # 因为 R1/H1_2/H2 的 HOME_KEYFRAME 维度可能跟 num_joints 不一致
+                    joint_targets = gait_fn(step_idx, dt=dt, speed=ep_speed,
+                                            command=ep_instruction,
+                                            num_joints=num_joints)
             elif agent == "random":
                 # 随机目标在 default ± 0.3 范围内
                 joint_targets = (default_angles
@@ -576,31 +696,47 @@ def collect_demonstrations(
                 except Exception as e:
                     if step_idx == 0:
                         logger.debug("trained 策略推理失败, 回退 scripted: %s", e)
-                    joint_targets = gait_fn(step_idx, dt=dt, speed=ep_speed,
-                                            command=ep_instruction)
+                    # 修复: 同上, fallback 也要传 num_joints
+                    if robot == "g1":
+                        joint_targets = gait_fn(step_idx, dt=dt, speed=ep_speed,
+                                                command=ep_instruction,
+                                                num_joints=num_joints)
+                    else:
+                        joint_targets = gait_fn(step_idx, dt=dt, speed=ep_speed,
+                                                command=ep_instruction,
+                                                num_joints=num_joints)
             else:
-                joint_targets = gait_fn(step_idx, dt=dt, speed=ep_speed,
-                                        command=ep_instruction)
+                # 修复: 同上
+                if robot == "g1":
+                    joint_targets = gait_fn(step_idx, dt=dt, speed=ep_speed,
+                                            command=ep_instruction,
+                                            num_joints=num_joints)
+                else:
+                    joint_targets = gait_fn(step_idx, dt=dt, speed=ep_speed,
+                                            command=ep_instruction,
+                                            num_joints=num_joints)
 
             # ─── 2) 推 mjlab 环境 (有的话) ─────────────────────────
+            # 注意: mjlab env.step() 内部已经自动处理 terminated env 的 reset
+            #       (调用 self._reset_idx(reset_env_ids)), 所以我们不需要再 reset
+            obs_dict: dict[str, Any] = {}
             if use_mjlab and env_raw is not None:
                 try:
                     import torch as _torch
                     action_tensor = _torch.from_numpy(joint_targets).unsqueeze(0).to(device)
                     obs_out, reward, terminated, truncated, info = env_raw.step(action_tensor)
 
-                    # 自动 reset (避免 episode 越界)
-                    if terminated or truncated:
-                        env_raw.reset()
-
-                    # 重新计算 per-key obs (mjlab step 后 obs_out 是拼接 tensor)
-                    obs_dict = _get_per_key_obs(env_raw)
+                    # 检查是否有 env 被自动 reset (terminated/truncated)
+                    # mjlab step 已 reset, 但我们需要同步 prev_ee_pose (新 episode 起点)
+                    if (terminated.any() or truncated.any()) and action_mode == "relative_eef":
+                        prev_ee_pose = None
                 except Exception as e:
                     if step_idx == 0:
                         logger.warning("mjlab step 失败, 回退模拟: %s", e)
                     obs_dict = {}
-            else:
-                obs_dict = {}
+                else:
+                    # 重新计算 per-key obs (mjlab step 后 obs_out 是拼接 tensor)
+                    obs_dict = _get_per_key_obs(env_raw)
 
             # ─── 3) 提取 state ──────────────────────────────────────
             joint_pos = _to_numpy(obs_dict.get("joint_pos_rel",
@@ -623,11 +759,11 @@ def collect_demonstrations(
                 base_lin_vel = base_lin_vel or blv
                 base_ang_vel = base_ang_vel or bav
 
-            # 维度修正: critic obs 里 joint_pos 是 relative(减 default), 我们要 absolute
-            # unitree_rl_mjlab 的 joint_pos_rel = (joint_pos - default)
-            # 这里反过来 add 回去
-            if obs_dict.get("joint_pos_rel") is not None and joint_pos is not None:
-                # mjlab 返回的是 rel, 还原为 abs
+            # 维度修正: mjlab term `joint_pos` 的 func=mdp.joint_pos_rel, 内容是相对值
+            # 修复: 旧代码用 obs_dict.get("joint_pos_rel") is not None → 永远 False
+            #       (term 名是 "joint_pos" 不是 "joint_pos_rel"), 改用 obs_dict.get("joint_pos")
+            if obs_dict.get("joint_pos") is not None and joint_pos is not None:
+                # mjlab 返回的是 rel (=joint_pos - default), 还原为 abs
                 joint_pos = joint_pos + default_angles
 
             # ─── 4) 构造动作 (按 action_mode) ───────────────────────
@@ -642,10 +778,31 @@ def collect_demonstrations(
                     "action.joint_position_last": current_joint_pos.astype(np.float32),
                 }
             elif action_mode == "relative_eef":
-                # TODO: 实际 EE 增量需要 IK; 这里 fallback 到 zero delta
-                # 后续可通过 mujoco forward kinematics 计算末端位姿
+                # 修复: 用 mujoco forward kinematics 计算当前末端位姿,
+                #      然后减去上一时刻得到 7D delta (xyz + quat_wxyz)
+                if action_mode_ee_body is None and robot != "g1":
+                    # Go2 没有末端执行器, 退到 zero (这是预期行为)
+                    ee_pose_delta = np.zeros(7, dtype=np.float32)
+                else:
+                    ee_body_name = action_mode_ee_body or "left_rubber_hand"
+                    cur_ee_pose = _get_ee_pose(env_raw, ee_body_name, num_envs=1)
+                    if cur_ee_pose is None:
+                        # FK 失败 (无 mjlab / 无 FK), 退到 zero
+                        ee_pose_delta = np.zeros(7, dtype=np.float32)
+                    elif prev_ee_pose is None:
+                        # 第一帧无 prev, 用 zero delta (不要用 random, 避免破坏训练分布)
+                        ee_pose_delta = np.zeros(7, dtype=np.float32)
+                    else:
+                        # 位姿 delta: xyz 直接相减, quat 用"左乘 prev 的逆"得到增量
+                        pos_delta = cur_ee_pose[:3] - prev_ee_pose[:3]
+                        # quat_delta = cur * prev^{-1} (wxyz 约定)
+                        quat_delta = _quat_diff_wxyz(cur_ee_pose[3:], prev_ee_pose[3:])
+                        ee_pose_delta = np.concatenate([pos_delta, quat_delta]).astype(np.float32)
+                    # 更新 prev (即使本帧是 zero, 下一帧也要基于此)
+                    if cur_ee_pose is not None:
+                        prev_ee_pose = cur_ee_pose
                 action_record = {
-                    "action.ee_pose_delta": np.zeros(7, dtype=np.float32),
+                    "action.ee_pose_delta": ee_pose_delta,
                 }
             else:
                 raise ValueError(f"未知 action_mode: {action_mode}")
@@ -779,76 +936,46 @@ def _get_per_key_obs(env_raw: Any) -> dict[str, Any]:
     """从 unitree_rl_mjlab ManagerBasedRlEnv 取 per-key 观测 (dict[str, tensor]).
 
     mjlab env.step() 返回的 obs 是按 actor/critic 拼接的 tensor,
-    这里通过 observation_manager.compute() 拿分组前的 dict。
+    这里直接通过 Entity.data 拿分组前的 dict (因为 mjlab ObservationManager
+    默认 concatenate_terms=True, 没有 per-key 访问接口).
+
+    修复: 删除对 om.terms / om._terms 的尝试 (mjlab ObservationManager
+         无此属性, 是死代码; 直接走 Entity.data 即可).
     """
     out: dict[str, Any] = {}
     try:
-        om = env_raw.unwrapped.observation_manager
-        # compute() 返回 {"actor": tensor, "critic": tensor}; 我们要 per-key
-        groups = om.compute()
-        # 尝试拿到 ObservationManager 的 terms (mjlab 内部结构)
-        # 旧 mjlab: om._terms (dict[group_name → dict[term_name → term]])
-        # 新 mjlab: om.terms
-        for getter_name in ("terms", "_terms"):
-            terms = getattr(om, getter_name, None)
-            if not terms:
-                continue
-            for group_name, group_terms in terms.items():
-                if not isinstance(group_terms, dict):
-                    continue
-                for term_name, term in group_terms.items():
-                    # term.data 是当前帧的 tensor
-                    data = getattr(term, "data", None)
-                    if data is None:
-                        continue
-                    if hasattr(data, "squeeze"):
-                        out[term_name] = data
-            break
-        # 如果拿到 groups 但 terms 不在 manager 上, 直接尝试 compute_group
-        if not out and hasattr(om, "compute_group"):
-            for group_name in ("actor", "critic"):
-                try:
-                    g = om.compute_group(group_name)  # (num_envs, group_dim)
-                    out[group_name] = g
-                except Exception:
-                    pass
-    except Exception as e:
-        logger.debug("observation_manager.compute 失败: %s", e)
-
-    # 兜底: 拿 robot entity 的 raw state (mjlab Entity.data)
-    try:
         robot = env_raw.unwrapped.scene["robot"]
         rd = robot.data
-        # 常用字段 (参考 mjlab EntityData)
-        if "base_pos" not in out and getattr(rd, "root_link_pos_w", None) is not None:
-            out["base_pos"] = rd.root_link_pos_w          # (num_envs, 3)
-        if "base_quat" not in out and getattr(rd, "root_link_quat_w", None) is not None:
-            out["base_quat"] = rd.root_link_quat_w        # (num_envs, 4)
-        if "base_lin_vel" not in out and getattr(rd, "root_link_lin_vel_w", None) is not None:
-            out["base_lin_vel"] = rd.root_link_lin_vel_w
-        if "base_ang_vel" not in out and getattr(rd, "root_link_ang_vel_w", None) is not None:
-            out["base_ang_vel"] = rd.root_link_ang_vel_w
-        if "joint_pos" not in out and getattr(rd, "joint_pos", None) is not None:
-            out["joint_pos"] = rd.joint_pos               # 关节绝对位置 (rad)
-        if "joint_vel" not in out and getattr(rd, "joint_vel", None) is not None:
-            out["joint_vel"] = rd.joint_vel
+        # base pose/velocity (mjlab root_link_* 字段, shape (num_envs, D))
+        out["base_pos"] = rd.root_link_pos_w
+        out["base_quat"] = rd.root_link_quat_w
+        out["base_lin_vel"] = rd.root_link_lin_vel_w
+        out["base_ang_vel"] = rd.root_link_ang_vel_w
+        # joint (mjlab Entity.data.joint_pos 是绝对位置; mjlab term `joint_pos`
+        #        func=mdp.joint_pos_rel 返回 rel, 此处用 Entity.data 绝对)
+        out["joint_pos"] = rd.joint_pos
+        out["joint_vel"] = rd.joint_vel
     except Exception as e:
-        logger.debug("Entity.data 兜底失败: %s", e)
+        logger.debug("Entity.data 失败: %s", e)
 
     return out
+
 
 
 def _render_frame(env_raw: Any, ep: int, step: int) -> np.ndarray | None:
     """从 mjlab env 渲染一帧 RGB 图像 (H, W, 3) uint8.
 
-    尝试多种 API (兼容性):
-      1) env.render() → gym-style
-      2) env.unwrapped.sim.render(...) → mujoco offscreen
-      3) 直接 mjlab 的 viewer.render()
+    多种 API 兼容性尝试:
+      1) env.render()                — gym-style (mjlab 已内置 _offline_renderer, 最优)
+      2) env.unwrapped.sim.mj_data   — 直接走 mujoco native offscreen (兼容)
+      3) viser / native viewer (需 DISPLAY)
+
+    修复: 优先用 env.render() (它内部已封装 mjlab 的 OffscreenRenderer),
+         不再手造 mujoco.Renderer (复杂 + 容易出现 model/dim 不一致).
     """
     if env_raw is None:
         return None
-    # 方案 1: gym-style render
+    # 方案 1: gym-style render (mjlab 内部用 _offline_renderer)
     try:
         frame = env_raw.render()
         if frame is not None:
@@ -859,26 +986,22 @@ def _render_frame(env_raw: Any, ep: int, step: int) -> np.ndarray | None:
             return arr
     except Exception:
         pass
-    # 方案 2: mjlab sim.render (offscreen)
+    # 方案 2: mjlab sim.mj_data + mujoco.Renderer (兜底)
     try:
         sim = env_raw.unwrapped.sim
-        # mjlab 的 sim 实际是 mujoco Warp 后端, 通过 sim._model / sim._data 拿 mujoco native
-        native = getattr(sim, "_model", None), getattr(sim, "_data", None)
-        if native[0] is not None and native[1] is not None:
-            import mujoco  # noqa
-            renderer = getattr(env_raw.unwrapped, "_renderer", None)
-            if renderer is None:
-                # 懒加载
-                from mujoco import Renderer
-                viewer_cfg = env_raw.unwrapped.cfg.viewer
-                renderer = Renderer(
-                    height=int(getattr(viewer_cfg, "height", 224)),
-                    width=int(getattr(viewer_cfg, "width", 224)),
-                )
-            renderer.update_scene(native[1], camera=getattr(env_raw.unwrapped.cfg.viewer,
-                                                           "camera_name", -1))
-            frame = renderer.render()
-            return np.asarray(frame).astype(np.uint8)
+        mj_model = sim.mj_model
+        mj_data = sim.mj_data
+        import mujoco  # noqa
+        from mujoco import Renderer
+        viewer_cfg = env_raw.unwrapped.cfg.viewer
+        h = int(getattr(viewer_cfg, "height", 224))
+        w = int(getattr(viewer_cfg, "width", 224))
+        renderer = Renderer(model=mj_model, height=h, width=w)
+        # mjlab ViewerConfig 没有 camera_name, 用 entity_name + body_name 推断
+        # 默认渲染 root body (-1 = free camera)
+        renderer.update_scene(mj_data, camera=-1)
+        frame = renderer.render()
+        return np.asarray(frame).astype(np.uint8)
     except Exception as e:
         if step == 0:
             logger.debug("sim.render 失败: %s", e)
@@ -898,9 +1021,14 @@ def _simulate_observation(
     """
     t = step_idx * dt
 
+    # 修复: 用 joint_targets.shape[0] 而不是 num_joints
+    # 因为不同机器人的 default_angles 维度可能跟 num_joints 不一致
+    # (例如 H2 的 30 关节里只有 29 个 actuated)
+    actual_dim = joint_targets.shape[0] if joint_targets is not None else num_joints
+
     # 模拟关节位置: 目标 + 小噪声
-    joint_pos = joint_targets + np.random.randn(num_joints).astype(np.float32) * 0.01
-    joint_vel = np.zeros(num_joints, dtype=np.float32)
+    joint_pos = joint_targets + np.random.randn(actual_dim).astype(np.float32) * 0.01
+    joint_vel = np.zeros(actual_dim, dtype=np.float32)
 
     # 模拟基座运动
     base_pos = np.array([0.5 * t, 0.0, 0.78], dtype=np.float32)  # 匀速前进
@@ -909,6 +1037,82 @@ def _simulate_observation(
     base_ang_vel = np.zeros(3, dtype=np.float32)
 
     return joint_pos, joint_vel, base_pos, base_quat, base_lin_vel, base_ang_vel
+
+
+def _get_ee_pose(
+    env_raw: Any,
+    body_name: str,
+    num_envs: int = 1,
+) -> np.ndarray | None:
+    """通过 mujoco forward kinematics 获取末端执行器当前位姿 (xyz + quat_wxyz).
+
+    修复: 用于 relative_eef 模式的真实 EE 增量计算 (替代旧的零向量 fallback)
+
+    Args:
+        env_raw: unitree_rl_mjlab ManagerBasedRlEnv (需 unwrapped.sim)
+        body_name: MJCF 中定义的 body name (e.g. "left_rubber_hand")
+        num_envs: 环境数量, 默认 1 (取第 0 个 env)
+
+    Returns:
+        np.ndarray (7,) [x, y, z, qw, qx, qy, qz] 或 None (失败时)
+    """
+    if env_raw is None:
+        return None
+    try:
+        sim = env_raw.unwrapped.sim
+        # mjlab 修复: sim.mj_model / sim.mj_data 是原生 mujoco (有 .xpos/.xquat)
+        #   sim.data / sim.model 是 Warp DataBridge/ModelBridge, 没有 .xpos
+        #   旧代码用 sim._data / sim._model → AttributeError (不存在)
+        mj_model = sim.mj_model
+        mj_data = sim.mj_data
+        # 触发 forward kinematics 更新 (确保 xpos/xquat 是当前状态)
+        # 注意: env.step() 已经自动调用 sim.forward(), 这里再调一次是幂等安全
+        if hasattr(sim, "forward"):
+            sim.forward()
+        import mujoco  # noqa
+        body_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+        if body_id < 0:
+            logger.debug("EE body 不存在: %s", body_name)
+            return None
+        # mj_data.xpos/xquat 是一维: shape (nbody,) / (nbody, 4) (单 env)
+        pos = np.asarray(mj_data.xpos[body_id], dtype=np.float32)
+        quat = np.asarray(mj_data.xquat[body_id], dtype=np.float32)  # wxyz
+        return np.concatenate([pos, quat]).astype(np.float32)
+    except Exception as e:
+        logger.debug("FK 失败 (%s): %s", body_name, e)
+        return None
+
+
+def _quat_diff_wxyz(cur: np.ndarray, prev: np.ndarray) -> np.ndarray:
+    """计算两个 wxyz 四元数的"相对旋转": cur * prev^{-1}.
+
+    修复: 用于 relative_eef 模式的姿态增量计算 (避免数值不稳定的"直接相减")
+
+    Args:
+        cur: 当前四元数 (4,) wxyz
+        prev: 上一时刻四元数 (4,) wxyz
+
+    Returns:
+        delta 四元数 (4,) wxyz, 表示从 prev 旋转到 cur 的最小旋转
+    """
+    # 1) prev 的共轭 (逆, 单位四元数): (w, -x, -y, -z)
+    prev_conj = np.array(
+        [prev[0], -prev[1], -prev[2], -prev[3]], dtype=np.float32
+    )
+    # 2) cur ⊗ prev_conj (Hamilton 乘积, wxyz)
+    w1, x1, y1, z1 = cur
+    w2, x2, y2, z2 = prev_conj
+    delta = np.array([
+        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,  # w
+        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,  # x
+        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,  # y
+        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,  # z
+    ], dtype=np.float32)
+    # 3) 归一化 (防止累积浮点漂移)
+    norm = np.linalg.norm(delta)
+    if norm > 1e-8:
+        delta = delta / norm
+    return delta
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -982,12 +1186,17 @@ def main():
                         help="视频帧率 (default: 0 = auto 根据仿真 dt 算; "
                              "GR00T 训练推荐 30)")
     parser.add_argument("--camera-name", type=str, default=None,
-                        help="mjlab camera name (None=默认 front_view)")
+                        help="mjlab camera name (None=默认 front_view; "
+                             "修复: 此选项目前无 effect, mjlab ViewerConfig 未暴露 "
+                             "camera_name 字段, 需在任务 env_cfg 中修改。")
     parser.add_argument("--viser", action="store_true",
                         help="启用 viser 浏览器可视化 (显示 episode 进度 / 步数 / "
                              "指令 / base velocity; 需 pip install viser)")
     parser.add_argument("--viser-port", type=int, default=8080,
                         help="viser 服务器端口 (default: 8080)")
+    parser.add_argument("--ee-body", type=str, default=None,
+                        help="relative_eef 模式下的末端 body name (G1 默认 left_rubber_hand; "
+                             "Go2 不支持。例: --ee-body right_rubber_hand)")
     args = parser.parse_args()
 
     if args.output_dir is None:
@@ -1022,6 +1231,7 @@ def main():
         camera_name=args.camera_name,
         viser=args.viser,
         viser_port=args.viser_port,
+        ee_body=args.ee_body,
     )
 
 
