@@ -1,39 +1,59 @@
 #!/usr/bin/env python3
-"""
-数据格式转换 — npz → LeRobot v2 格式
+"""数据格式转换 — npz → LeRobot v2 (Isaac-GR00T 兼容)
 
 读取 collect_data.py 产出的:
   - episode_*.npz         (state + action + reward + 每 episode instruction)
   - episode_*.mp4         (RGB 视频, 可选)
   - episode_*_frames.npz  (frames 序列, 当 imageio 不可用时的 fallback)
 
-转换为 GR00T fine-tune 所需的 LeRobot v2 标准格式:
+转换为 GR00T fine-tune 所需的 LeRobot v2 标准格式 (与 Isaac-GR00T
+demo_data/cube_to_bowl_5 完全一致):
+
   output_dir/
   ├── meta/
-  │   ├── modality.json   # 模态配置 (state/action/video 维度)
-  │   ├── episodes.jsonl  # 每 episode 元数据 (含 task_index)
-  │   ├── tasks.jsonl     # 任务描述列表 (去重)
-  │   └── info.json       # 数据集元信息
+  │   ├── info.json              # LeRobot v2 dataset metadata
+  │   ├── modality.json          # GR00T start/end slice schema
+  │   ├── episodes.jsonl         # 每 episode: index, tasks, length
+  │   ├── tasks.jsonl            # task_index → task string
+  │   └── stats.json             # 由 gr00t/data/stats.py 生成 (本脚本不写)
   ├── data/
   │   └── chunk-000/
-  │       └── file-000.parquet  # 所有 step 的 state/action 数据
+  │       └── file-000.parquet   # 所有 step 的数据 (state/action 拼接为单列)
   └── videos/
       └── chunk-000/
-          └── episode_*.mp4     # 复制的视频 (GR00T LeRobot v2 期望此结构)
+          └── observation.images.front_view/
+              └── episode_NNNNNN.mp4
 
-此脚本与仿真引擎完全无关, 只关心 npz 文件中的数据结构。
+parquet 列结构 (关键):
+  - observation.state : float32[71]  (G1) / float32[37]  (Go2)   ← 拼接
+  - action            : float32[29]  (G1) / float32[12]  (Go2)   ← 拼接
+  - task_index        : int64[1]     (索引 tasks.jsonl)
+  - frame_index       : int64[1]
+  - episode_index     : int64[1]
+  - index             : int64[1]     (全局 step 序号)
+  - timestamp         : float32[1]
+  - observation.images.front_view : str  (相对路径, GR00T 内部抽帧)
+
+注意: state/action 都是**拼接的单列**, 通过 modality.json 的 start/end 切片
+被 GR00T 数据加载器分解为各子字段。
 
 使用方法:
-    # 默认转换 (从 metadata.json 读取 action_mode 等参数)
+    # 默认 (从 metadata.json 读 action_mode)
     python convert_to_lerobot.py --robot g1 \\
-        --data-dir /workspace/data/g1_raw \\
-        --output-dir /workspace/data/g1_lerobot
+        --data-dir data/g1_raw \\
+        --output-dir data/g1_lerobot
 
     # 显式指定 action_mode
     python convert_to_lerobot.py --robot g1 \\
         --action-mode delta \\
-        --data-dir /workspace/data/g1_raw \\
-        --output-dir /workspace/data/g1_lerobot
+        --data-dir data/g1_raw \\
+        --output-dir data/g1_lerobot
+
+转换完成后, 必须在云端或本地跑一次 stats 生成:
+    python gr00t/data/stats.py \\
+        --dataset-path data/g1_lerobot \\
+        --embodiment-tag NEW_EMBODIMENT \\
+        --modality-config-path <path-to>/g1_new_embodiment_config.py
 """
 
 from __future__ import annotations
@@ -53,6 +73,35 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 常量: 与 GR00T demo data 一致
+# ──────────────────────────────────────────────────────────────────────────────
+
+# LeRobot data path 模板 (与 demo_data/cube_to_bowl_5/info.json 一致)
+# 关键: loader 用 episode_index 读取 parquet, 不能用 file_index
+DATA_PATH_TEMPLATE = "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet"
+# GR00T 期望的视频路径: {video_key} 会被 modality.json video.<key>.original_key 替换
+VIDEO_PATH_TEMPLATE = "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
+CHUNKS_SIZE = 1000
+LEROBOT_CODEBASE_VERSION = "v2.1"
+
+
+# state 拼接顺序: 与 configs/g1_config.py _build_state_layout 一致
+STATE_KEYS_ORDER = [
+    "joint_pos",
+    "joint_vel",
+    "base_pos",
+    "base_quat",
+    "base_lin_vel",
+    "base_ang_vel",
+]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 工具函数
+# ──────────────────────────────────────────────────────────────────────────────
 
 
 def _to_python_list(v: Any) -> list | None:
@@ -81,31 +130,118 @@ def _load_episode_npz(ep_path: Path) -> dict[str, Any]:
     return out
 
 
-def _try_load_video(ep_idx: int, data_path: Path, videos_dst: Path,
-                    video_height: int, video_width: int, video_fps: int) -> str | None:
-    """查找并复制 episode 的视频到 LeRobot 期望的位置.
+def _get_state_vector(obs: dict, num_joints: int) -> np.ndarray:
+    """从单步 obs dict 提取并按 STATE_KEYS_ORDER 拼接 state 向量.
+
+    缺失的字段用零填充 (G1: 71 维, Go2: 37 维, 计算自 g1_config._build_state_layout).
+    """
+    layout_dims = {
+        "joint_pos":    num_joints,
+        "joint_vel":    num_joints,
+        "base_pos":     3,
+        "base_quat":    4,
+        "base_lin_vel": 3,
+        "base_ang_vel": 3,
+    }
+    parts = []
+    for key in STATE_KEYS_ORDER:
+        v = obs.get(f"state.{key}")
+        if v is None:
+            v = np.zeros(layout_dims[key], dtype=np.float32)
+        else:
+            v = np.asarray(v, dtype=np.float32).ravel()
+            if v.shape[0] != layout_dims[key]:
+                logger.warning("state.%s 维度不对: got %d, expected %d, 用 0 填充",
+                               key, v.shape[0], layout_dims[key])
+                v = np.zeros(layout_dims[key], dtype=np.float32)
+        parts.append(v)
+    return np.concatenate(parts).astype(np.float32)
+
+
+def _get_action_vector(act: dict, action_mode: str, num_joints: int) -> np.ndarray:
+    """从单步 act dict 提取 action 向量 (按 action_mode).
+
+    与 modality.json action 块中 start/end 的拼接顺序一致 (参见
+    configs/g1_config.py: _build_action_layout).
+    """
+    if action_mode == "absolute":
+        # action: { "joint_position_target": (num_joints,) }
+        v = act.get("action.joint_position_target")
+        if v is None:
+            v = act.get("target_joint_pos")
+        if v is None:
+            v = np.zeros(num_joints, dtype=np.float32)
+        else:
+            v = np.asarray(v, dtype=np.float32).ravel()
+        if v.shape[0] != num_joints:
+            v = np.zeros(num_joints, dtype=np.float32)
+        return v.astype(np.float32)
+
+    elif action_mode == "delta":
+        # action: { "joint_position_delta": (num_joints,) }
+        v = act.get("action.joint_position_delta")
+        if v is None:
+            v = np.zeros(num_joints, dtype=np.float32)
+        else:
+            v = np.asarray(v, dtype=np.float32).ravel()
+        if v.shape[0] != num_joints:
+            v = np.zeros(num_joints, dtype=np.float32)
+        return v.astype(np.float32)
+
+    elif action_mode == "relative_eef":
+        # action: { "ee_pose_delta": (7,) }  pos(3) + quat(4)
+        v = act.get("action.ee_pose_delta")
+        if v is None:
+            v = np.zeros(7, dtype=np.float32)
+        else:
+            v = np.asarray(v, dtype=np.float32).ravel()
+        if v.shape[0] != 7:
+            v = np.zeros(7, dtype=np.float32)
+        return v.astype(np.float32)
+
+    else:
+        raise ValueError(f"未知 action_mode: {action_mode}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 视频处理
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _try_load_video(
+    ep_idx: int,
+    data_path: Path,
+    videos_chunk_dir: Path,
+    video_height: int,
+    video_width: int,
+    video_fps: int,
+    video_subdir: str,
+) -> str | None:
+    """复制/编码 episode 的视频到 LeRobot 期望的 videos/chunk-XXX/<original_key>/ 下.
 
     优先级:
-      1) episode_NNNNNN.mp4 (imageio 输出)
+      1) episode_NNNNNN.mp4 (imageio 输出) — 直接复制
       2) episode_NNNNNN_frames.npz → 重新编码为 mp4
 
     Returns:
-        相对路径 (用于 parquet 中的 video 字段), 或 None (无视频)
+        相对路径 (写入 parquet 前会被替换为 observation.images.front_view/<file>),
+        或 None (无视频).
     """
     ep_id = f"{ep_idx:06d}"
     mp4_src = data_path / f"episode_{ep_id}.mp4"
     frames_src = data_path / f"episode_{ep_id}_frames.npz"
 
-    videos_dst.mkdir(parents=True, exist_ok=True)
-    mp4_dst = videos_dst / f"episode_{ep_id}.mp4"
+    # 视频子目录名 = modality.json video.front_view.original_key 的值
+    video_dst_dir = videos_chunk_dir / video_subdir
+    video_dst_dir.mkdir(parents=True, exist_ok=True)
+    mp4_dst = video_dst_dir / f"episode_{ep_id}.mp4"
 
     if mp4_src.exists():
         if not mp4_dst.exists() or mp4_dst.stat().st_size != mp4_src.stat().st_size:
             shutil.copy2(mp4_src, mp4_dst)
-        return f"videos/chunk-000/episode_{ep_id}.mp4"
+        return f"videos/chunk-000/{video_subdir}/episode_{ep_id}.mp4"
 
     if frames_src.exists():
-        # 重新编码 frames → mp4
         try:
             import imageio.v2 as imageio
         except ImportError:
@@ -119,12 +255,17 @@ def _try_load_video(ep_idx: int, data_path: Path, videos_dst: Path,
         try:
             frames = np.load(frames_src)["frames"]
             imageio.mimsave(str(mp4_dst), list(frames), fps=video_fps)
-            return f"videos/chunk-000/episode_{ep_id}.mp4"
+            return f"videos/chunk-000/{video_subdir}/episode_{ep_id}.mp4"
         except Exception as e:
             logger.warning("frames → mp4 编码失败 (ep %s): %s", ep_id, e)
             return None
 
     return None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 主转换函数
+# ──────────────────────────────────────────────────────────────────────────────
 
 
 def convert(
@@ -134,13 +275,13 @@ def convert(
     action_mode: str | None = None,
     skip_video: bool = False,
 ) -> str:
-    """将收集的 npz (+mp4) 数据转换为 LeRobot v2 格式.
+    """将 collect_data.py 输出的 npz (+mp4) 数据转换为 LeRobot v2 格式.
 
     Args:
         robot: "g1" 或 "go2"
         data_dir: collect_data.py 输出目录
         output_dir: LeRobot v2 输出目录
-        action_mode: 强制覆盖 (None = 从 metadata.json 读, 默认 "absolute")
+        action_mode: 强制覆盖 (None = 从 metadata.json 读, 默认 "delta")
         skip_video: 不复制/不编码视频
 
     Returns:
@@ -168,50 +309,68 @@ def convert(
         logger.warning("未找到 metadata.json, 使用默认值")
         metadata = {
             "robot": robot.upper(),
-            "task_id": "Unitree-G1-Flat",
+            "task_id": "Unitree-G1-Flat" if robot == "g1" else "Unitree-Go2-Flat",
             "instruction": "walk forward",
             "instruction_pool": ["walk forward"],
-            "action_mode": "absolute",
+            "action_mode": "delta",
             "enable_video": False,
-            "video_fps": 50,
+            "video_fps": 30,
             "video_height": 224,
             "video_width": 224,
             "num_joints": 29 if robot == "g1" else 12,
             "dt": 0.02,
-            "state_dim": (29 if robot == "g1" else 12) * 2 + 3 + 4 + 3 + 3,
         }
 
-    # 确定 action_mode
-    action_mode = action_mode or metadata.get("action_mode", "absolute")
+    # 确定 action_mode / robot 元数据
+    action_mode = action_mode or metadata.get("action_mode", "delta")
     if action_mode not in ("absolute", "delta", "relative_eef"):
-        logger.warning("未知 action_mode '%s', 回退 absolute", action_mode)
-        action_mode = "absolute"
+        logger.warning("未知 action_mode '%s', 回退 delta", action_mode)
+        action_mode = "delta"
 
+    num_joints = 29 if robot == "g1" else 12
     has_video = (not skip_video) and bool(metadata.get("enable_video"))
-    video_fps = int(metadata.get("video_fps", 50))
+    video_fps = int(metadata.get("video_fps", 30))
     video_height = int(metadata.get("video_height", 224))
     video_width = int(metadata.get("video_width", 224))
+    # 与 g1_config.G1_VIDEO_KEY 保持一致
+    video_subdir = "observation.images.front_view"
 
-    # ── 1. 写入 modality.json ─────────────────────────────────────────
+    # 维度计算
+    if robot == "g1":
+        from configs.g1_config import get_g1_state_dim, get_g1_action_dim
+        state_dim = get_g1_state_dim()
+        action_dim = get_g1_action_dim(action_mode)
+    else:
+        from configs.go2_config import get_go2_state_dim, get_go2_action_dim
+        state_dim = get_go2_state_dim()
+        action_dim = get_go2_action_dim(action_mode)
+
+    logger.info("=" * 60)
+    logger.info("LeRobot v2 转换 (GR00T 兼容)")
+    logger.info("  机器人:        %s (%d joints)", robot, num_joints)
+    logger.info("  动作空间:      %s", action_mode)
+    logger.info("  state_dim:     %d (拼接后)", state_dim)
+    logger.info("  action_dim:    %d (拼接后)", action_dim)
+    logger.info("  视频:          %s", "✅" if has_video else "❌")
+    logger.info("=" * 60)
+
+    # ── 1. 写入 modality.json (GR00T start/end schema) ─────────────────
     if robot == "g1":
         from configs.g1_config import get_g1_modality_config
-        modality = get_g1_modality_config(action_mode=action_mode)
-        video_key = "video.front_view"
+        modality = get_g1_modality_config(
+            action_mode=action_mode, include_video=has_video,
+        )
     else:
         from configs.go2_config import get_go2_modality_config
-        modality = get_go2_modality_config(action_mode=action_mode)
-        video_key = "video.front_view"
-
-    # 如果源数据无视频, 从 modality 里去掉 video 块
-    if not has_video and "video" in modality:
-        logger.info("源数据无视频, modality.json 不包含 video 字段")
-        del modality["video"]
+        modality = get_go2_modality_config(
+            action_mode=action_mode, include_video=has_video,
+        )
 
     meta_dir = output_path / "meta"
     meta_dir.mkdir(parents=True, exist_ok=True)
     with open(meta_dir / "modality.json", "w") as f:
         json.dump(modality, f, indent=2, ensure_ascii=False)
-    logger.info("保存 modality.json (action_mode=%s)", action_mode)
+    logger.info("✅ 写入 meta/modality.json")
 
     # ── 2. 找出所有 episode npz ─────────────────────────────────────────
     episodes = sorted(data_path.glob("episode_*.npz"))
@@ -220,23 +379,43 @@ def convert(
         sys.exit(1)
     logger.info("找到 %d 个 episodes", len(episodes))
 
-    # ── 3. 处理视频 (复制到 videos/chunk-000/ 下, GR00T 期望路径) ───
-    videos_dst = output_path / "videos" / "chunk-000"
+    # ── 3. 处理视频 ────────────────────────────────────────────────────
+    videos_chunk_dir = output_path / "videos" / "chunk-000"
     video_relpaths: dict[int, str | None] = {}
     if has_video:
-        logger.info("复制/编码视频到 %s ...", videos_dst)
+        logger.info("复制/编码视频到 %s ...", videos_chunk_dir)
         for ep_idx in range(len(episodes)):
-            rel = _try_load_video(ep_idx, data_path, videos_dst,
-                                  video_height, video_width, video_fps)
+            rel = _try_load_video(
+                ep_idx, data_path, videos_chunk_dir,
+                video_height, video_width, video_fps, video_subdir,
+            )
             video_relpaths[ep_idx] = rel
         n_videos = sum(1 for v in video_relpaths.values() if v is not None)
         logger.info("视频处理完成: %d / %d 个 episode 有视频", n_videos, len(episodes))
+        if n_videos == 0:
+            logger.warning("所有 episode 都没有视频, 但 metadata 声明 enable_video=true. "
+                           "回退到无视频模式.")
+            has_video = False
+            # 重写 modality.json (去掉 video 块)
+            if robot == "g1":
+                from configs.g1_config import get_g1_modality_config
+                modality = get_g1_modality_config(
+                    action_mode=action_mode, include_video=False,
+                )
+            else:
+                from configs.go2_config import get_go2_modality_config
+                modality = get_go2_modality_config(
+                    action_mode=action_mode, include_video=False,
+                )
+            with open(meta_dir / "modality.json", "w") as f:
+                json.dump(modality, f, indent=2, ensure_ascii=False)
 
     # ── 4. 转换每 episode 到 parquet rows ─────────────────────────────
     data_records: list[dict[str, Any]] = []
     episode_metadata: list[dict[str, Any]] = []
-    task_to_index: dict[str, int] = {}  # instruction → task_index
+    task_to_index: dict[str, int] = {}
     tasks_list: list[dict[str, Any]] = []
+    global_index = 0  # 全局 step 序号 (对应 parquet 'index' 列)
 
     for ep_idx, ep_path in enumerate(episodes):
         try:
@@ -249,31 +428,27 @@ def convert(
         actions = data.get("actions")
         rewards = data.get("rewards")
         ep_instruction_arr = data.get("instruction")
-        # instruction 可能是: 0-d 数组 / 1-d 数组 / Python str / numpy 标量
-        # 用 .size (或 len) 都得先把它转成可定长判断的形态
+
+        # 解 instruction
         if ep_instruction_arr is None:
             ep_instruction = None
         elif isinstance(ep_instruction_arr, str):
             ep_instruction = ep_instruction_arr if ep_instruction_arr else None
         else:
-            # 尝试用 numpy 通用接口, 避免 0-d 数组触发 len() 报错
             try:
                 arr = np.asarray(ep_instruction_arr)
                 if arr.size == 0:
                     ep_instruction = None
+                elif arr.ndim == 0:
+                    ep_instruction = str(arr.item())
                 else:
-                    # 0-d 数组 → 标量; 1-d → 取第一个
-                    if arr.ndim == 0:
-                        ep_instruction = str(arr.item())
-                    else:
-                        ep_instruction = str(arr.flatten()[0])
+                    ep_instruction = str(arr.flatten()[0])
             except Exception:
                 ep_instruction = str(ep_instruction_arr)
 
         if not ep_instruction:
             ep_instruction = metadata.get("instruction", "walk forward")
 
-        # 注册 task
         if ep_instruction not in task_to_index:
             task_to_index[ep_instruction] = len(tasks_list)
             tasks_list.append({"task_index": len(tasks_list), "task": ep_instruction})
@@ -282,14 +457,12 @@ def convert(
             logger.warning("Episode %d 缺 observations/actions, 跳过", ep_idx)
             continue
 
-        # 统一 array 化
         if isinstance(observations, list):
             n_steps = len(observations)
         else:
             n_steps = len(rewards) if rewards is not None else len(actions)
 
         for step_idx in range(n_steps):
-            # obs 解析
             obs_raw = observations[step_idx]
             if isinstance(obs_raw, dict):
                 obs = obs_raw
@@ -298,7 +471,6 @@ def convert(
             else:
                 obs = {}
 
-            # action 解析
             act_raw = actions[step_idx]
             if isinstance(act_raw, dict):
                 act = act_raw
@@ -307,65 +479,31 @@ def convert(
             else:
                 act = {}
 
+            # ── 拼接 state / action 为 1D 数组 ───────────────────
+            state_vec = _get_state_vector(obs, num_joints)
+            action_vec = _get_action_vector(act, action_mode, num_joints)
+
             record: dict[str, Any] = {
+                "observation.state": state_vec,                   # float32[state_dim]
+                "action":            action_vec,                  # float32[action_dim]
+                "task_index":    task_to_index[ep_instruction],
+                "frame_index":   step_idx,
                 "episode_index": ep_idx,
-                "frame_index": step_idx,
-                "timestamp": float(step_idx * metadata.get("dt", 0.02)),
-                "task_index": task_to_index[ep_instruction],
-                "reward": float(rewards[step_idx]) if rewards is not None else 0.0,
-                "done": bool(step_idx == n_steps - 1),
-                # GR00T 期望的 language annotation key
-                "annotation.language.action_text": ep_instruction,
+                "index":         global_index,
+                "timestamp":     float(step_idx * metadata.get("dt", 0.02)),
             }
 
-            # ── state.* 字段 ───────────────────────────────────────
-            for k, v in obs.items():
-                if not isinstance(k, str) or not k.startswith("state."):
-                    continue
-                if v is None:
-                    continue
-                if isinstance(v, np.ndarray):
-                    record[k] = v.tolist()
-                elif isinstance(v, (list, tuple)):
-                    record[k] = list(v)
-                else:
-                    try:
-                        record[k] = float(v)
-                    except Exception:
-                        record[k] = v
-
-            # ── action.* 字段 (按 action_mode) ────────────────────
-            # 注意: 不能用 `or` 串联 act.get(), 否则 numpy 数组会触发
-            #       "The truth value of an array with more than one element is ambiguous"
-            if action_mode == "absolute":
-                v = act.get("action.joint_position_target")
-                if v is None:
-                    v = act.get("target_joint_pos")
-                if v is not None and isinstance(v, np.ndarray):
-                    record["action.joint_position_target"] = v.tolist()
-            elif action_mode == "delta":
-                v = act.get("action.joint_position_delta")
-                if v is not None and isinstance(v, np.ndarray):
-                    record["action.joint_position_delta"] = v.tolist()
-                last = act.get("action.joint_position_last")
-                if last is not None and isinstance(last, np.ndarray):
-                    record["action.joint_position_last"] = last.tolist()
-            elif action_mode == "relative_eef":
-                v = act.get("action.ee_pose_delta")
-                if v is not None and isinstance(v, np.ndarray):
-                    record["action.ee_pose_delta"] = v.tolist()
-
-            # ── 视频路径 (每条 step 写同一个 mp4 路径, GR00T 会抽帧)
+            # 视频相对路径 (per-row 都写同一个, GR00T 内部抽帧)
             if has_video and video_relpaths.get(ep_idx) is not None:
-                record[video_key] = video_relpaths[ep_idx]
+                record[video_subdir] = video_relpaths[ep_idx]
 
             data_records.append(record)
+            global_index += 1
 
         episode_metadata.append({
             "episode_index": ep_idx,
+            "tasks": [ep_instruction],   # 注意: GR00T 用 list (per LeRobot v2 spec)
             "length": n_steps,
-            "task": ep_instruction,
-            "task_index": task_to_index[ep_instruction],
         })
         if (ep_idx + 1) % 50 == 0:
             logger.info("  转换进度: %d / %d episodes", ep_idx + 1, len(episodes))
@@ -376,75 +514,135 @@ def convert(
 
     # ── 5. 写 Parquet ─────────────────────────────────────────────────
     df = pd.DataFrame(data_records)
-    # 确保数值列是 list 而非 numpy (parquet 兼容性)
-    for col in df.columns:
-        if col in ("episode_index", "frame_index", "task_index"):
-            df[col] = df[col].astype(int)
-        elif col == "reward":
-            df[col] = df[col].astype(float)
-    data_dir_out = output_path / "data" / "chunk-000"
-    data_dir_out.mkdir(parents=True, exist_ok=True)
-    parquet_path = data_dir_out / "file-000.parquet"
-    df.to_parquet(parquet_path, index=False)
-    logger.info("保存 Parquet: %s (%d 行, %d 列)",
-                parquet_path, len(df), len(df.columns))
+    # 把 numpy 数组列显式转 list (parquet 兼容)
+    for col in ("observation.state", "action"):
+        if col in df.columns:
+            df[col] = df[col].apply(lambda a: np.asarray(a, dtype=np.float32).tolist())
+    for col in ("task_index", "frame_index", "episode_index", "index"):
+        if col in df.columns:
+            df[col] = df[col].astype("int64")
+    if "timestamp" in df.columns:
+        df["timestamp"] = df["timestamp"].astype("float32")
+    if video_subdir in df.columns:
+        df[video_subdir] = df[video_subdir].astype("object")
 
-    # ── 6. 写 episodes.jsonl ──────────────────────────────────────────
+    # ── 每个 episode 一个 parquet, 匹配官方 LeRobot v2 格式 ────────────────
+    # GR00T 的 lerobot_episode_loader 通过 data_path 模板按 episode_index 读取:
+    #   parquet_filename = data_path_pattern.format(episode_chunk=..., episode_index=...)
+    # 因此 data/chunk-XXX/episode_NNNNNN.parquet 是必须的命名格式。
+    n_episodes_written = 0
+    for ep_idx in range(len(episodes)):
+        ep_df = df[df["episode_index"] == ep_idx].copy()
+        if ep_df.empty:
+            continue
+        chunk_idx = ep_idx // CHUNKS_SIZE
+        chunk_dir = output_path / "data" / f"chunk-{chunk_idx:03d}"
+        chunk_dir.mkdir(parents=True, exist_ok=True)
+        ep_parquet_path = chunk_dir / f"episode_{ep_idx:06d}.parquet"
+        ep_df.to_parquet(ep_parquet_path, index=False)
+        n_episodes_written += 1
+    logger.info("✅ 写入 %d 个 episode parquet (chunk-000/episode_NNNNNN.parquet)",
+                n_episodes_written)
+
+    # ── 6. 写 episodes.jsonl (LeRobot v2: tasks=list, length=int) ────
     episodes_path = meta_dir / "episodes.jsonl"
     with open(episodes_path, "w") as f:
         for ep in episode_metadata:
-            f.write(json.dumps(ep) + "\n")
-    logger.info("保存 episodes.jsonl (%d episodes, %d unique tasks)",
-                len(episode_metadata), len(tasks_list))
+            f.write(json.dumps(ep, ensure_ascii=False) + "\n")
+    logger.info("✅ 写入 meta/episodes.jsonl (%d episodes)", len(episode_metadata))
 
     # ── 7. 写 tasks.jsonl ─────────────────────────────────────────────
     tasks_path = meta_dir / "tasks.jsonl"
     with open(tasks_path, "w") as f:
         for t in tasks_list:
-            f.write(json.dumps(t) + "\n")
-    logger.info("保存 tasks.jsonl (%d tasks):", len(tasks_list))
+            f.write(json.dumps(t, ensure_ascii=False) + "\n")
+    logger.info("✅ 写入 meta/tasks.jsonl (%d unique tasks)", len(tasks_list))
     for t in tasks_list:
         logger.info("  [%d] %s", t["task_index"], t["task"][:60])
 
-    # ── 8. 写 info.json (GR00T LeRobot 期望) ──────────────────────────
-    info = {
-        "robot_type": robot.upper(),
-        "total_episodes": len(episode_metadata),
-        "total_frames": len(data_records),
-        "fps": video_fps if has_video else int(round(1.0 / metadata.get("dt", 0.02))),
-        "features": {
-            **{k: {"dtype": "float32", "shape": v.get("shape", [])}
-               for k, v in modality.get("state", {}).items()},
-            **{k: {"dtype": "float32", "shape": v.get("shape", [])}
-               for k, v in modality.get("action", {}).items()},
-            **({video_key: {"dtype": "video", "shape": [video_height, video_width, 3],
-                           "fps": video_fps}} if has_video else {}),
-            "annotation.language.action_text": {"dtype": "str", "shape": []},
-            "task_index": {"dtype": "int64", "shape": []},
-        },
-        "source_metadata": metadata,  # 完整保存采集时元数据
-        "created_at": metadata.get("created_at"),
+    # ── 8. 写 info.json (LeRobot v2 + GR00T) ──────────────────────────
+    # state/action 都是拼接单列; 维度从 modality.json 推算
+    features: dict[str, Any] = {
+        "observation.state": {"dtype": "float32", "shape": [state_dim]},
+        "action":            {"dtype": "float32", "shape": [action_dim]},
+        "task_index":        {"dtype": "int64",   "shape": [1], "names": None},
+        "frame_index":       {"dtype": "int64",   "shape": [1], "names": None},
+        "episode_index":     {"dtype": "int64",   "shape": [1], "names": None},
+        "index":             {"dtype": "int64",   "shape": [1], "names": None},
+        "timestamp":         {"dtype": "float32", "shape": [1], "names": None},
+    }
+    if has_video:
+        features[video_subdir] = {
+            "dtype": "video",
+            "shape": [video_height, video_width, 3],
+            "names": ["height", "width", "channels"],
+            "info": {
+                "video.height":      video_height,
+                "video.width":       video_width,
+                "video.codec":       "h264",
+                "video.pix_fmt":     "yuv420p",
+                "video.is_depth_map": False,
+                "video.fps":         video_fps,
+                "video.channels":    3,
+                "has_audio":         False,
+            },
+        }
+
+    fps_value = video_fps if has_video else int(round(1.0 / metadata.get("dt", 0.02)))
+
+    info: dict[str, Any] = {
+        "codebase_version":   LEROBOT_CODEBASE_VERSION,
+        "robot_type":         robot.upper(),
+        "total_episodes":     len(episode_metadata),
+        "total_frames":       len(data_records),
+        "total_tasks":        len(tasks_list),
+        "total_chunks":       1,                  # 当前 1 个 chunk 目录 (chunks_size=1000 控制多 chunk)                  # 与官方 demo 一致 (当 chunks_size=1000 时)
+        "total_videos":       len(episodes) if has_video else 0,
+        "chunks_size":        CHUNKS_SIZE,
+        "fps":                fps_value,
+        "splits":             {"train": f"0:{len(episode_metadata)}"},
+        "data_path":          DATA_PATH_TEMPLATE,
+        "video_path":         VIDEO_PATH_TEMPLATE if has_video else None,
+        "features":           features,
+        "source_metadata":    metadata,  # 保留采集时的完整 metadata
     }
     with open(meta_dir / "info.json", "w") as f:
         json.dump(info, f, indent=2, ensure_ascii=False)
-    logger.info("保存 info.json")
+    logger.info("✅ 写入 meta/info.json (codebase_version=%s, fps=%d, features=%d 项)",
+                LEROBOT_CODEBASE_VERSION, fps_value, len(features))
 
     # ── 9. 汇总 ───────────────────────────────────────────────────────
     logger.info("=" * 60)
     logger.info("✅ 转换完成!")
     logger.info("  输入:   %s (%d episodes)", data_dir, len(episodes))
     logger.info("  输出:   %s", output_dir)
-    logger.info("  Frames: %d", len(data_records))
+    logger.info("  Frames: %d (total)", len(data_records))
     logger.info("  Tasks:  %d unique", len(tasks_list))
-    logger.info("  Video:  %s", "✅" if has_video else "❌ (no video in source)")
+    logger.info("  Video:  %s (%d eps)",
+                "✅" if has_video else "❌",
+                len(episodes) if has_video else 0)
     logger.info("=" * 60)
+    logger.info("")
+    logger.info("⚠️  重要: 训练前必须生成 stats.json + relative_stats.json:")
+    logger.info("  在云端 (有 Isaac-GR00T 仓库) 跑:")
+    logger.info("    source /root/Isaac-GR00T/.venv/bin/activate")
+    logger.info("    cd /root/Isaac-GR00T")
+    if robot == "g1":
+        cfg = "g1_new_embodiment_config" if action_mode == "delta" else "g1_new_embodiment_config_absolute"
+    else:
+        cfg = "go2_new_embodiment_config" if action_mode == "delta" else "go2_new_embodiment_config_absolute"
+    logger.info("    python3 gr00t/data/stats.py \\")
+    logger.info("        --dataset-path %s \\", output_path)
+    logger.info("        --embodiment-tag NEW_EMBODIMENT \\")
+    logger.info("        --modality-config-path /root/gr00t_mjlab_autodl/src/configs/%s.py", cfg)
+    logger.info("")
 
     return str(output_path)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="npz → LeRobot v2 格式转换 (GR00T fine-tune)",
+        description="npz → LeRobot v2 格式转换 (Isaac-GR00T fine-tune)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--robot", type=str, default="g1", choices=["g1", "go2"],

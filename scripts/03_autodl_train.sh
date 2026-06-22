@@ -227,6 +227,43 @@ info "视频文件数: $VIDEO_COUNT"
 echo ""
 
 # ════════════════════════════════════════════════════════════════════════════
+# Phase 1.5: 生成 stats.json (归一化必需) — GR00T 数据加载从 meta/stats.json 读取
+# ════════════════════════════════════════════════════════════════════════════
+step "Phase 1.5/4: 生成 dataset stats (用于 state/action 归一化)..."
+
+# 选择 ModalityConfig (与 Phase 2 选择逻辑一致)
+case "$ROBOT" in
+    g1)  case "$ACTION_MODE" in
+            delta|relative|relative_eef) MOD_CONFIG="src/configs/g1_new_embodiment_config.py" ;;
+            absolute)                    MOD_CONFIG="src/configs/g1_new_embodiment_config_absolute.py" ;;
+            *) MOD_CONFIG="src/configs/g1_new_embodiment_config.py" ;;
+        esac ;;
+    go2) case "$ACTION_MODE" in
+            delta|relative|relative_eef) MOD_CONFIG="src/configs/go2_new_embodiment_config.py" ;;
+            absolute)                    MOD_CONFIG="src/configs/go2_new_embodiment_config_absolute.py" ;;
+            *) MOD_CONFIG="src/configs/go2_new_embodiment_config.py" ;;
+        esac ;;
+esac
+MOD_CONFIG_PATH="$GR00T_REPO/$MOD_CONFIG"
+[ ! -f "$MOD_CONFIG_PATH" ] && MOD_CONFIG_PATH="/root/gr00t_mjlab_autodl/$MOD_CONFIG"
+[ ! -f "$MOD_CONFIG_PATH" ] && MOD_CONFIG_PATH="/root/workspace/gr00t_mjlab_autodl/$MOD_CONFIG"
+
+if [ -f "$MOD_CONFIG_PATH" ]; then
+    python3 gr00t/data/stats.py \
+        --dataset-path "$LEROBOT_DATA_DIR" \
+        --embodiment-tag "NEW_EMBODIMENT" \
+        --modality-config-path "$MOD_CONFIG_PATH"
+    if [ -f "$LEROBOT_DATA_DIR/meta/stats.json" ] && [ -f "$LEROBOT_DATA_DIR/meta/relative_stats.json" ]; then
+        info "✅ stats.json + relative_stats.json 已生成"
+    else
+        warn "stats 生成后未找到 meta/stats.json, 训练时归一化可能回退到运行时计算"
+    fi
+else
+    warn "未找到 ModalityConfig, 跳过 stats 生成 (launch_finetune 会自动 import DEFAULT_MODALITY_CONFIG)"
+fi
+echo ""
+
+# ════════════════════════════════════════════════════════════════════════════
 # Phase 2: Fine-tune 训练 (官方默认: projector + diffusion, 关闭 LLM/visual)
 # ════════════════════════════════════════════════════════════════════════════
 step "Phase 2/4: Fine-tune 训练..."
@@ -249,6 +286,32 @@ EXTRA_ARGS=()
 [ "$TUNE_LLM" = true ]    && EXTRA_ARGS+=(--tune-llm)
 [ "$TUNE_VISUAL" = true ] && EXTRA_ARGS+=(--tune-visual)
 [ "$SAVE_ONLY_MODEL" = true ] && EXTRA_ARGS+=(--save-only-model)
+
+# 根据 ROBOT + ACTION_MODE 选择 ModalityConfig 文件
+# 需与本地采集时使用的 action_mode 严格一致
+case "$ROBOT" in
+    g1)  case "$ACTION_MODE" in
+            delta|relative|relative_eef) MOD_CONFIG="src/configs/g1_new_embodiment_config.py" ;;
+            absolute)                    MOD_CONFIG="src/configs/g1_new_embodiment_config_absolute.py" ;;
+            *) MOD_CONFIG="src/configs/g1_new_embodiment_config.py" ;;
+        esac ;;
+    go2) case "$ACTION_MODE" in
+            delta|relative|relative_eef) MOD_CONFIG="src/configs/go2_new_embodiment_config.py" ;;
+            absolute)                    MOD_CONFIG="src/configs/go2_new_embodiment_config_absolute.py" ;;
+            *) MOD_CONFIG="src/configs/go2_new_embodiment_config.py" ;;
+        esac ;;
+    *) fail "未知 robot: $ROBOT (仅支持 g1 / go2)" ;;
+esac
+# ModalityConfig 是 local Python file, 上传训练包时已打包在 gr00t_mjlab_autodl/
+MOD_CONFIG_PATH="$GR00T_REPO/$MOD_CONFIG"
+[ ! -f "$MOD_CONFIG_PATH" ] && MOD_CONFIG_PATH="/root/gr00t_mjlab_autodl/$MOD_CONFIG"
+[ ! -f "$MOD_CONFIG_PATH" ] && MOD_CONFIG_PATH="/root/workspace/gr00t_mjlab_autodl/$MOD_CONFIG"
+if [ ! -f "$MOD_CONFIG_PATH" ]; then
+    warn "未找到 ModalityConfig: $MOD_CONFIG, 训练会报 NEW_EMBODIMENT 未注册错误"
+else
+    info "ModalityConfig: $MOD_CONFIG_PATH  (action_mode=$ACTION_MODE)"
+    EXTRA_ARGS+=(--modality-config-path "$MOD_CONFIG_PATH")
+fi
 
 python3 gr00t/experiment/launch_finetune.py \
     --base-model-path "$BASE_MODEL_DIR" \

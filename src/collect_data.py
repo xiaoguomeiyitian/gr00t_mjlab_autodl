@@ -430,8 +430,9 @@ def collect_demonstrations(
         if enable_video:
             env_cfg.viewer.width = video_width
             env_cfg.viewer.height = video_height
-            if camera_name is not None:
-                env_cfg.viewer.camera_name = camera_name
+            # 注: mjlab ViewerConfig 不暴露 camera_name 字段
+            # 仿真默认相机名以资产定义为准, 这里只能调整 lookat/distance/elevation/azimuth
+            # 如需定制, 请在 unitree_rl_mjlab 的任务 env_cfg 中修改 ViewerConfig
 
         # ─── 创建原始 env (用于获取 per-key obs / state / 渲染) ───
         render_mode = "rgb_array" if enable_video else None
@@ -463,7 +464,14 @@ def collect_demonstrations(
             # 包装成 VecEnv (policy 需要)
             env_wrapped = RslRlVecEnvWrapper(env_raw, clip_actions=agent_cfg.clip_actions)
 
-            runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
+            # 注: load_runner_cls 访问 _REGISTRY[task_name].runner_cls, 未知任务会 KeyError。
+            # mjlab 的 load_runner_cls 本身能返回 None (表示走默认 OnPolicyRunner),
+            # 因此只需包一层 try/except 处理未注册任务场景。
+            try:
+                runner_cls = load_runner_cls(task_id)
+            except KeyError:
+                runner_cls = None
+            runner_cls = runner_cls or MjlabOnPolicyRunner
             runner = runner_cls(env_wrapped, _asdict_safe(agent_cfg), device=device)
             runner.load(str(checkpoint), load_cfg={"actor": True}, strict=True,
                         map_location=device)

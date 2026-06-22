@@ -76,7 +76,7 @@ def export_int4(
     logger.info("  基础模型: %s", model_path)
     logger.info("=" * 60)
 
-    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    from transformers import AutoModel, AutoProcessor, BitsAndBytesConfig
 
     # ── 0. 自动检测输入类型 ─────────────────────────────────────────────
     if input_type == "auto":
@@ -112,7 +112,7 @@ def export_int4(
 
         step("加载 BF16 模型并直接量化为 INT4...")
         try:
-            base = AutoModelForCausalLM.from_pretrained(
+            base = AutoModel.from_pretrained(
                 str(model_path_obj),
                 quantization_config=quant_config,
                 device_map=device_map,
@@ -125,7 +125,7 @@ def export_int4(
 
         # BF16 完整模型已含合并后的权重, 直接量化即可
         model = base
-        tokenizer_source = str(model_path_obj)
+        processor_source = str(model_path_obj)
 
     else:
         # argparse choices 已限制 input_type 只能是 "auto" | "fp16", 此分支不可达
@@ -135,17 +135,19 @@ def export_int4(
     step("保存 INT4 量化模型...")
     model.save_pretrained(str(output_path))
 
-    # 保存 tokenizer (优先从本地 BF16 模型读, 失败则从 HF 读)
+    # 保存 processor (优先从本地 BF16 模型读, 失败则从 HF 读)
+    # Gr00tPolicy 加载时会把 processor/ 子目录或根目录的 processor_config.json
+    # 都识别, 这里把 processor 文件直接落到模型根, 保持与官方约定一致
     try:
-        tok = AutoTokenizer.from_pretrained(
-            tokenizer_source,
+        proc = AutoProcessor.from_pretrained(
+            processor_source,
             trust_remote_code=True,
             local_files_only=offline,
         )
-        tok.save_pretrained(str(output_path))
-        logger.info("✅ Tokenizer 保存完成 (源: %s)", tokenizer_source)
+        proc.save_pretrained(str(output_path))
+        logger.info("✅ Processor 保存完成 (源: %s)", processor_source)
     except Exception as e:
-        logger.warning("Tokenizer 保存失败: %s (不影响推理)", e)
+        logger.warning("Processor 保存失败: %s (不影响推理, 但 Gr00tPolicy 加载时需手动指定 processor_dir)", e)
 
     # ── 4. 统计大小 ─────────────────────────────────────────────────────
     size_mb = sum(

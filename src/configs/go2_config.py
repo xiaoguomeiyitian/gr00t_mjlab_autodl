@@ -32,18 +32,21 @@ GO2_DEFAULT_ACTION_MODE = "delta"
 
 # ── 默认站立姿态 (INIT_STATE from unitree_rl_mjlab) ────────────────────────
 # source: src/assets/robots/unitree_go2/go2_constants.py
+# 注意: go2_constants.py 用 `.*_thigh_joint` 正则匹配四条腿, 所以四条腿
+# thigh 都是 0.9, calf 都是 -1.8。hip 用 `.*R_hip_joint` / `.*L_hip_joint` 区
+# 分左右, FL/RL 标 -0.1, FR/RR 标 0.1。
 GO2_DEFAULT_JOINT_ANGLES = {
-    "FL_hip_joint": 0.0,
+    "FL_hip_joint": -0.1,    # ← 修复: 之前是 0.0 (与 mjlab 官方不符)
     "FL_thigh_joint": 0.9,
     "FL_calf_joint": -1.8,
     "FR_hip_joint": 0.1,
     "FR_thigh_joint": 0.9,
     "FR_calf_joint": -1.8,
     "RL_hip_joint": -0.1,
-    "RL_thigh_joint": 1.0,
+    "RL_thigh_joint": 0.9,   # ← 修复: 之前是 1.0
     "RL_calf_joint": -1.8,
-    "RR_hip_joint": 0.0,
-    "RR_thigh_joint": 1.0,
+    "RR_hip_joint": 0.1,     # ← 修复: 之前是 0.0
+    "RR_thigh_joint": 0.9,   # ← 修复: 之前是 1.0
     "RR_calf_joint": -1.8,
 }
 
@@ -69,78 +72,66 @@ GO2_VIDEO_KEY = "video.front_view"
 GO2_DEFAULT_CAMERA_NAME = "front_view"
 
 
-# ── LeRobot v2 modality.json ────────────────────────────────────────────────
+# ── LeRobot v2 modality.json (GR00T 兼容) ─────────────────────────────
+#
+# 与 G1 同一 schema: state/action 用 start/end 切片, video 用 original_key。
+# 拼接顺序一致: joint_pos(12) | joint_vel(12) | base_pos(3) | base_quat(4)
+#              | base_lin_vel(3) | base_ang_vel(3) = 总 37 维
+# 动作: joint_position_delta(12) 或 joint_position_target(12)
 
-def get_go2_modality_config(action_mode: str = "delta") -> dict[str, Any]:
-    """返回 Go2 的 LeRobot v2 modality.json 内容。
+
+def get_go2_modality_config(action_mode: str = "delta", include_video: bool = True) -> dict[str, Any]:
+    """返回 Go2 的 LeRobot v2 modality.json 内容 (GR00T 兼容).
 
     Args:
         action_mode: "absolute" | "delta"
+        include_video: 是否包含 video 块 (采集时如未采视频须设 False)
     """
-    if action_mode == "absolute":
-        action_block = {
-            "action.joint_position_target": {
-                "dtype": "float32",
-                "shape": [GO2_NUM_JOINTS],
-                "description": "Go2 12 关节目标位置 (rad, 绝对量)",
-            },
-        }
-    elif action_mode == "delta":
-        action_block = {
-            "action.joint_position_delta": {
-                "dtype": "float32",
-                "shape": [GO2_NUM_JOINTS],
-                "description": "Go2 12 关节目标位置增量 (rad, 相对当前)",
-            },
-            "action.joint_position_last": {
-                "dtype": "float32",
-                "shape": [GO2_NUM_JOINTS],
-                "description": "Go2 12 关节上一时刻位置 (rad, 用于 delta 累加)",
-            },
-        }
-    else:
-        raise ValueError(f"未知 action_mode: {action_mode}")
+    # 复用 G1 的 layout 辅助函数 (go2 与 g1 的 state/action 字段结构一致)
+    from configs.g1_config import _build_state_layout, _build_action_layout
 
-    return {
-        "state": {
-            "state.joint_pos": {
-                "dtype": "float32",
-                "shape": [GO2_NUM_JOINTS],
-                "description": "Go2 12 关节位置 (rad)",
-            },
-            "state.joint_vel": {
-                "dtype": "float32",
-                "shape": [GO2_NUM_JOINTS],
-                "description": "Go2 12 关节速度 (rad/s)",
-            },
-            "state.base_pos": {
-                "dtype": "float32",
-                "shape": [3],
-                "description": "基座位置 (m, world frame)",
-            },
-            "state.base_quat": {
-                "dtype": "float32",
-                "shape": [4],
-                "description": "基座四元数 (wxyz, world frame)",
-            },
-            "state.base_lin_vel": {
-                "dtype": "float32",
-                "shape": [3],
-                "description": "基座线速度 (m/s, world frame)",
-            },
-            "state.base_ang_vel": {
-                "dtype": "float32",
-                "shape": [3],
-                "description": "基座角速度 (rad/s, world frame)",
-            },
-        },
+    state_layout, state_total = _build_state_layout(GO2_NUM_JOINTS)
+    action_layout, action_total = _build_action_layout(action_mode, GO2_NUM_JOINTS)
+
+    state_block: dict[str, Any] = {}
+    cursor = 0
+    for key, dim in state_layout:
+        state_block[key] = {"start": cursor, "end": cursor + dim}
+        cursor += dim
+    assert cursor == state_total, f"state dim mismatch: {cursor} != {state_total}"
+
+    action_block: dict[str, Any] = {}
+    cursor = 0
+    for key, dim in action_layout:
+        action_block[key] = {"start": cursor, "end": cursor + dim}
+        cursor += dim
+    assert cursor == action_total, f"action dim mismatch: {cursor} != {action_total}"
+
+    cfg: dict[str, Any] = {
+        "state": state_block,
         "action": action_block,
-        "video": {
-            GO2_VIDEO_KEY: {
-                "dtype": "video",
-                "shape": [GO2_VIDEO_HEIGHT, GO2_VIDEO_WIDTH, 3],
-                "fps": GO2_VIDEO_FPS,
-                "description": f"前方 RGB 相机 ({GO2_VIDEO_HEIGHT}x{GO2_VIDEO_WIDTH} @ {GO2_VIDEO_FPS}fps)",
-            },
+        "annotation": {
+            "human.task_description": {"original_key": "task_index"},
         },
     }
+
+    if include_video:
+        cfg["video"] = {
+            "front_view": {"original_key": "observation.images.front_view"},
+        }
+
+    return cfg
+
+
+def get_go2_state_dim() -> int:
+    """返回 Go2 state 拼接后的总维度."""
+    from configs.g1_config import _build_state_layout
+    _, total = _build_state_layout(GO2_NUM_JOINTS)
+    return total
+
+
+def get_go2_action_dim(action_mode: str = "delta") -> int:
+    """返回 Go2 action 拼接后的总维度."""
+    from configs.g1_config import _build_action_layout
+    _, total = _build_action_layout(action_mode, GO2_NUM_JOINTS)
+    return total

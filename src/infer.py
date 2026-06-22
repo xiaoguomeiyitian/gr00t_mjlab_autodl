@@ -8,15 +8,17 @@ GR00T 本地推理包装器 — 基于 unitree_rl_mjlab 仿真环境进行推理
   - mjlab Viser 3D 可视化回放
 
 使用方法:
-    # INT4 推理 (8GB GPU)
+    # INT4 推理 (8GB GPU, 已量化的模型)
     python infer.py --robot g1 \
         --model-path models/g1_gr00t_int4 \
         --instruction "walk forward"
 
-    # FP16 推理 (24GB+ GPU)
+    # BF16 推理 (24GB+ GPU, fine-tune 输出)
     python infer.py --robot g1 \
-        --model-path models/g1_gr00t \
-        --quantize none
+        --model-path models/g1_gr00t
+
+注: Isaac-GR00T N1.7 Gr00tPolicy 在 from_pretrained 时已自动加载模型保存时的精度/dtype。
+    训练时是 BF16, INT4 量化后是 4-bit, 推理时无需再传 --quantize (历史参数已忽略)。
 """
 
 from __future__ import annotations
@@ -107,46 +109,93 @@ class GR00TLocalInference:
         self._policy = None
 
     def load(self):
-        """加载 GR00T 模型。"""
+        """加载 GR00T 模型 (Isaac-GR00T N1.7 Gr00tPolicy)."""
         logger.info("加载 GR00T 模型: %s", self.model_path)
         logger.info("  机器人: %s (%d joints)", self.robot, self.num_joints)
         logger.info("  量化: %s", self.quantize)
         logger.info("  设备: %s", self.device)
 
         try:
-            # 需要 Isaac-GR00T 项目中的 gr00t 策略包
-            # 推荐安装: pip install gr00t (或 git clone https://github.com/NVIDIA/Isaac-GR00T)
-            from gr00t_integration.gr00t_policy import Gr00tPolicy, Gr00tConfig
-            self._policy = Gr00tPolicy(Gr00tConfig(
-                model_path=self.model_path,
-                embodiment_tag=self.embodiment_tag,
-                device=self.device,
-                dtype="float16",
-                action_horizon=self.action_horizon,
-                quantize=self.quantize,
-            ))
-            logger.info("✅ GR00T 模型加载成功")
+            # 官方 Isaac-GR00T (N1.7) 策略实现
+            from gr00t.policy.gr00t_policy import Gr00tPolicy
+            from gr00t.data.embodiment_tags import EmbodimentTag
         except ImportError as e:
-            logger.error("无法加载 GR00T: %s", e)
-            logger.info("请确保已安装 Isaac-GR00T:")
-            logger.info("  git clone https://github.com/NVIDIA/Isaac-GR00T.git")
-            logger.info("  cd Isaac-GR00T && uv sync --python 3.10")
-            logger.info("或将 gr00t_integration 包放到 PYTHONPATH")
+            logger.error("无法导入 Isaac-GR00T: %s", e)
+            logger.info("请确保已安装 Isaac-GR00T 并将 gr00t/ 加入 PYTHONPATH:")
+            logger.info("  export PYTHONPATH=/root/unitree/Isaac-GR00T:$PYTHONPATH")
             raise
 
+        # 注意: GR00T 模型保存时已经包含量化信息 (INT4/BF16/FP16),
+        # 不需要在加载时再次指定 dtype 或 quantize。
+        # Gr00tPolicy 签名: (embodiment_tag, model_path, *, device, strict)
+        self._policy = Gr00tPolicy(
+            embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,
+            model_path=str(self.model_path),
+            device=str(self.device),
+            strict=True,
+        )
+        # ModalityConfigs: self._policy.modality_configs["action"].action_configs[0].rep
+        action_modality = self._policy.modality_configs.get("action")
+        if action_modality is None or not action_modality.action_configs:
+            raise RuntimeError("Policy 中找不到 action modality_configs, 模型可能不是 fine-tune 后产物")
+        self._action_rep = action_modality.action_configs[0].rep
+        self._action_keys = action_modality.modality_keys
+        logger.info("✅ GR00T 模型加载成功")
+        logger.info("  action.rep  = %s", self._action_rep)
+        logger.info("  action.keys = %s", self._action_keys)
+
+    def _build_policy_observation(self, obs: dict[str, Any]) -> dict[str, Any]:
+        """把 *单步* 仿真观测转换为 Gr00tPolicy 期望的 batched 形式.
+
+        Returns:
+            dict, 三个顶级 key:
+              video:   {view_name: np.ndarray (B=1, T=1, H, W, 3) uint8}
+              state:   {state_name: np.ndarray (B=1, T=1, D) float32}
+              language:{lang_name: list[list[str]]  shape (B=1, T=1)}
+        """
+        # ── video ──
+        frame = obs.get("video.front_view")
+        if frame is None:
+            frame = np.zeros((224, 224, 3), dtype=np.uint8)
+        if frame.ndim == 3:
+            frame = frame[None, None, ...]  # (H,W,3) -> (1,1,H,W,3)
+        elif frame.ndim == 4:
+            frame = frame[None, ...]        # (T,H,W,3) -> (1,T,H,W,3)
+        elif frame.ndim == 5 and frame.shape[0] != 1:
+            frame = frame[:1]
+        video = {"front_view": frame.astype(np.uint8)}
+
+        # ── state ──
+        # Gr00tPolicy 要求 state[key] 形状 (B, T, D), 这里 B=T=1
+        def _to_btd(x):
+            arr = np.asarray(x, dtype=np.float32)
+            return arr.reshape(1, 1, -1)
+
+        state = {
+            "joint_pos": _to_btd(obs["state.joint_pos"]),
+            "joint_vel": _to_btd(obs["state.joint_vel"]),
+            "base_pos":  _to_btd(obs["state.base_pos"]),
+            "base_quat": _to_btd(obs["state.base_quat"]),
+            "base_lin_vel": _to_btd(obs["state.base_lin_vel"]),
+            "base_ang_vel": _to_btd(obs["state.base_ang_vel"]),
+        }
+
+        # ── language ──
+        # 需要与 ModalityConfig.language.modality_keys[0] 一致
+        lang_key = self._policy.language_key
+        instruction = obs.get(
+            "annotation.language.action_text",
+            obs.get("instruction", "walk forward"),
+        )
+        language = {lang_key: [[str(instruction)]]}
+
+        return {"video": video, "state": state, "language": language}
+
     def get_action(self, obs: dict[str, Any]) -> np.ndarray:
-        """从观测生成动作。
+        """从观测生成动作 (单步关节目标).
 
         Args:
-            obs: 观测字典，包含:
-                - video.front_view: (224, 224, 3) uint8 RGB
-                - state.joint_pos: (num_joints,) float32
-                - state.joint_vel: (num_joints,) float32
-                - state.base_pos: (3,) float32
-                - state.base_quat: (4,) float32
-                - state.base_lin_vel: (3,) float32
-                - state.base_ang_vel: (3,) float32
-                - annotation.language.action_text: str
+            obs: 单步观测字典, 同上 _build_policy_observation 输入格式
 
         Returns:
             joint_targets: (num_joints,) float32, 关节目标位置
@@ -154,11 +203,23 @@ class GR00TLocalInference:
         if self._policy is None:
             self.load()
 
-        action_chunk = self._policy.get_action(obs)
-        # 取第一个时间步的动作
-        if isinstance(action_chunk, np.ndarray) and action_chunk.ndim == 2:
-            return action_chunk[0]
-        return np.array(action_chunk, dtype=np.float32)
+        policy_obs = self._build_policy_observation(obs)
+        action_dict, _info = self._policy._get_action(policy_obs)  # dict[np.ndarray (B,T,D)]
+
+        # 输出是 (B, T, D), 取 [0, 0, :]
+        first_key = self._action_keys[0]
+        delta = action_dict[first_key][0, 0]  # (D_action,)
+
+        # 当前 joint_pos 用于 RELATIVE 模式
+        current_pos = np.asarray(obs["state.joint_pos"], dtype=np.float32)
+
+        # ActionRepresentation: RELATIVE / ABSOLUTE / DELTA
+        from gr00t.data.types import ActionRepresentation  # local import
+        rep = self._action_rep
+        if rep == ActionRepresentation.RELATIVE:
+            return current_pos + delta
+        # ABSOLUTE 或 DELTA 直接作为目标
+        return delta.astype(np.float32)
 
     def run_inference_loop(
         self,
@@ -354,7 +415,8 @@ def main():
     parser.add_argument("--instruction", type=str, default="walk forward")
     parser.add_argument("--max-steps", type=int, default=200)
     parser.add_argument("--quantize", type=str, default="auto",
-                        choices=["auto", "none", "4bit", "8bit"])
+                        choices=["auto", "none", "4bit", "8bit"],
+                        help="(历史参数, 已忽略 — 推理 dtype 由模型保存时决定)")
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--show-viewer", action="store_true")
     args = parser.parse_args()
