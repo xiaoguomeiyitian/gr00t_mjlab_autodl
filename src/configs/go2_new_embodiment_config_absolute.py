@@ -44,6 +44,7 @@ go2_absolute_config = {
                 rep=ActionRepresentation.ABSOLUTE,
                 type=ActionType.NON_EEF,
                 format=ActionFormat.DEFAULT,
+                state_key="joint_pos",   # ← 修复: 显式声明, 保持与 delta 变体对称
             ),
         ],
     ),

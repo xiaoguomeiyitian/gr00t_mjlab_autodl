@@ -66,11 +66,7 @@ logger = logging.getLogger(__name__)
 
 
 def _asdict_safe(cfg: Any) -> dict[str, Any]:
-    """asdict 兼容版: 支持 frozen dataclass, 普通 class, 嵌套 dict 等。
-
-    mjlab 的 RslRlBaseRunnerCfg 是 frozen dataclass, 直接 asdict() 也行,
-    但部分版本有嵌套非 dataclass 字段, 这里用更宽松的实现。
-    """
+    """asdict 兼容版: 支持 frozen dataclass, 普通 class, 嵌套 dict 等."""
     try:
         from dataclasses import asdict, is_dataclass
         if is_dataclass(cfg):
@@ -112,70 +108,50 @@ def gait_generator_g1(
 ) -> np.ndarray:
     """G1 步态生成器 — 产生 29 维 (默认) 或 23 维关节目标。
 
-    修复: 支持 23Dof 变种 (Unitree-G1-23Dof-Flat/Rough)
     简单正弦步态: 双腿交替迈步，手臂自然摆动，腰部保持平衡。
     关节顺序与 unitree_rl_mjlab MJCF (g1.xml / g1_23dof.xml) 一致。
-
-    Args:
-        step_idx: 当前时间步
-        dt: 时间步长 (秒)
-        speed: 行走速度 (影响步频)
-        command: 语言指令 (影响方向)
-        num_joints: 关节数 (29 = 完整, 23 = 23Dof 变种)
-
-    Returns:
-        joint_targets: (num_joints,) float32, 关节目标位置 (rad)
     """
     t = step_idx * dt
     freq = speed * 2.0  # 步频
 
     if num_joints == 23:
-        # 23Dof: 无 waist_roll/waist_pitch, 无 wrist_pitch/wrist_yaw
-        # 顺序: 6 左腿 + 6 右腿 + 1 腰 + 5 左臂 + 5 右臂
         targets = np.array([
-            -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,        # 左腿 (6)
-            -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,        # 右腿 (6)
-            0.0,                                      # waist_yaw (1)
-            0.35, 0.18, 0.0, 0.87, 0.0,             # 左臂 (5, 无 wrist_pitch/yaw)
-            0.35, -0.18, 0.0, 0.87, 0.0,            # 右臂 (5)
+            -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,
+            -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,
+            0.0,
+            0.35, 0.18, 0.0, 0.87, 0.0,
+            0.35, -0.18, 0.0, 0.87, 0.0,
         ], dtype=np.float32)
     else:
-        # 29Dof: 完整 (default)
         targets = np.array([
-            -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,        # 左腿
-            -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,        # 右腿
-            0.0, 0.0, 0.0,                            # 腰部
-            0.35, 0.18, 0.0, 0.87, 0.0, 0.0, 0.0,   # 左臂
-            0.35, -0.18, 0.0, 0.87, 0.0, 0.0, 0.0,  # 右臂
+            -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,
+            -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,
+            0.0, 0.0, 0.0,
+            0.35, 0.18, 0.0, 0.87, 0.0, 0.0, 0.0,
+            0.35, -0.18, 0.0, 0.87, 0.0, 0.0, 0.0,
         ], dtype=np.float32)
 
-    # 左腿 (0-5): hip_pitch, hip_roll, hip_yaw, knee, ankle_pitch, ankle_roll
     phase_l = np.sin(2 * np.pi * freq * t)
-    targets[0] += 0.3 * phase_l           # hip_pitch: 前后摆
-    targets[1] += 0.05 * np.sin(phase_l)  # hip_roll: 微小侧摆
-    targets[3] += -0.4 * max(phase_l, 0)  # knee: 弯曲
+    targets[0] += 0.3 * phase_l
+    targets[1] += 0.05 * np.sin(phase_l)
+    targets[3] += -0.4 * max(phase_l, 0)
 
-    # 右腿 (6-11): 相位差 π
     phase_r = np.sin(2 * np.pi * freq * t + np.pi)
     targets[6] += 0.3 * phase_r
     targets[7] += 0.05 * np.sin(phase_r)
     targets[9] += -0.4 * max(phase_r, 0)
 
-    # 腰部 (12 或 12-14)
     if num_joints == 23:
-        # 23Dof: 只有 waist_yaw, 不做腰部运动
         pass
     else:
-        targets[13] += 0.02 * np.sin(2 * np.pi * freq * t)  # waist_pitch 微动
+        targets[13] += 0.02 * np.sin(2 * np.pi * freq * t)
 
-    # 左臂: 23Dof 起始 idx=13, 29Dof 起始 idx=15
     arm_l_start = 13 if num_joints == 23 else 15
-    # 右臂: 23Dof 起始 idx=18, 29Dof 起始 idx=22
     arm_r_start = 18 if num_joints == 23 else 22
 
     arm_phase = np.sin(2 * np.pi * freq * t)
-    targets[arm_l_start] += 0.2 * arm_phase           # shoulder_pitch
-    targets[arm_l_start + 3] += -0.1 * max(arm_phase, 0)  # elbow
+    targets[arm_l_start] += 0.2 * arm_phase
+    targets[arm_l_start + 3] += -0.1 * max(arm_phase, 0)
     targets[arm_r_start] += 0.2 * (-arm_phase)
     targets[arm_r_start + 3] += -0.1 * max(-arm_phase, 0)
 
@@ -187,7 +163,7 @@ def gait_generator_go2(
     dt: float = 0.02,
     speed: float = 0.5,
     command: str = "walk forward",
-    **kwargs,  # 兼容 num_joints 参数
+    **kwargs,
 ) -> np.ndarray:
     """Go2 步态生成器 — 产生 12 维关节目标。
 
@@ -197,28 +173,21 @@ def gait_generator_go2(
     t = step_idx * dt
     freq = speed * 2.5
 
-    # 默认站立姿态 (INIT_STATE from unitree_rl_mjlab)
-    default = np.array([
-        0.0, 0.9, -1.8,   # FL
-        0.1, 0.9, -1.8,   # FR
-        -0.1, 1.0, -1.8,  # RL
-        0.0, 1.0, -1.8,   # RR
-    ], dtype=np.float32)
+    from configs.go2_config import GO2_JOINT_NAMES, GO2_DEFAULT_JOINT_ANGLES
+    default = np.array(
+        [GO2_DEFAULT_JOINT_ANGLES[n] for n in GO2_JOINT_NAMES], dtype=np.float32
+    )
 
     targets = default.copy()
     phase = np.sin(2 * np.pi * freq * t)
 
-    # FL (0-2) 和 RR (9-11) 同步, FR (3-5) 和 RL (6-8) 反相
     for i, (hip_idx, thigh_idx, calf_idx) in enumerate([
-        (0, 1, 2),   # FL
-        (3, 4, 5),   # FR
-        (6, 7, 8),   # RL
-        (9, 10, 11), # RR
+        (0, 1, 2), (3, 4, 5), (6, 7, 8), (9, 10, 11),
     ]):
         p = phase if i % 2 == 0 else -phase
-        targets[hip_idx] += 0.15 * p           # hip: 侧摆
-        targets[thigh_idx] += 0.2 * abs(p)     # thigh: 抬腿
-        targets[calf_idx] += -0.3 * max(p, 0)  # calf: 弯曲
+        targets[hip_idx] += 0.15 * p
+        targets[thigh_idx] += 0.2 * abs(p)
+        targets[calf_idx] += -0.3 * max(p, 0)
 
     return targets
 
@@ -262,84 +231,109 @@ GAIT_GENERATORS = {
 # 任务 ID → 机器人类型映射
 # ──────────────────────────────────────────────────────────────────────────────
 
-# 修复: 对齐 unitree_rl_mjlab 实际注册的任务 ID
-#   (src/tasks/velocity/config/{g1,go2,a2,r1,h1_2,h2,as2,g1_23dof}/__init__.py)
 TASK_TO_ROBOT: dict[str, str] = {
-    # G1 (29 自由度 + 23 自由度)
     "Unitree-G1-Flat": "g1",
     "Unitree-G1-Rough": "g1",
     "Unitree-G1-23Dof-Flat": "g1",
     "Unitree-G1-23Dof-Rough": "g1",
-    # Go2 (12 自由度)
     "Unitree-Go2-Flat": "go2",
     "Unitree-Go2-Rough": "go2",
-    # A2 (四足)
     "Unitree-A2-Flat": "a2",
     "Unitree-A2-Rough": "a2",
-    # R1 (人形)
     "Unitree-R1-Flat": "r1",
     "Unitree-R1-Rough": "r1",
-    # H1_2 (人形)
     "Unitree-H1_2-Flat": "h1_2",
     "Unitree-H1_2-Rough": "h1_2",
-    # H2 (人形, 修复: 之前缺失)
     "Unitree-H2-Flat": "h2",
     "Unitree-H2-Rough": "h2",
-    # As2 (注意: 是 As2 不是 A2, 修复: 之前缺失)
     "Unitree-As2-Flat": "as2",
     "Unitree-As2-Rough": "as2",
 }
 
 
-# ──────────────────────────────────────────────────────────────────────────────# Viser 浏览器 viewer (可选, 用于远程监控数据采集进度)
-# ──────────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# Viser 浏览器 3D viewer (可选, 实时查看机器人运动)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# 延迟导入 (viser 是可选依赖)
+_ViserViewer3D: Any = None
+
+
+def _get_viser_viewer():
+    """延迟加载 AsyncViser3DViewer (避免 viser 未安装时崩溃)."""
+    global _ViserViewer3D
+    if _ViserViewer3D is None:
+        try:
+            from viser_3d_viewer import AsyncViser3DViewer
+            _ViserViewer3D = AsyncViser3DViewer
+        except ImportError:
+            logger.warning("viser_3d_viewer 未安装, 3D viewer 不可用")
+            _ViserViewer3D = None
+    return _ViserViewer3D
+
 
 class ViserViewer:
-    """在浏览器中实时显示数据采集进度 (依赖 viser 库).
+    """浏览器可视化: 3D 机器人运动 + 进度面板."""
 
-    提供:
-      - Episode / Step 进度
-      - 当前指令
-      - Base linear velocity 实时数值
-      - 关节目标范围
-
-    启动后打印 URL (如 http://localhost:8080), 浏览器打开即可.
-    默认关闭 (--viser 启用).
-    """
-
-    def __init__(self, port: int = 8080):
-        import viser  # 延迟导入 (viser 是可选依赖)
-        self.server = viser.ViserServer(host="0.0.0.0", port=port)
+    def __init__(self, env=None, port: int = 8080):
+        self._viewer_3d = None
+        self._server = None
+        self.port = port
         self.url = f"http://localhost:{port}"
 
-        with self.server.gui.add_folder("📊 进度"):
-            self.ep_text = self.server.gui.add_text("Episode", initial_value="-/-", disabled=True)
-            self.step_text = self.server.gui.add_text("Step", initial_value="-/-", disabled=True)
-            self.instr_text = self.server.gui.add_text("指令", initial_value="(初始化中...)", disabled=True)
+        Viewer3D = _get_viser_viewer()
+        if Viewer3D is not None and env is not None:
+            try:
+                self._viewer_3d = Viewer3D(env=env, port=port)
+                self._viewer_3d.start()
+                self.url = self._viewer_3d.url
+                logger.info("🌐 Viser 3D viewer 已启动: %s", self.url)
+                return
+            except Exception as e:
+                logger.warning("3D viewer 启动失败, 回退到文本模式: %s", e)
 
-        with self.server.gui.add_folder("🤖 状态"):
-            self.base_vel_text = self.server.gui.add_text("Base vel (m/s)", initial_value="-", disabled=True)
-            self.action_text = self.server.gui.add_text("关节目标范围", initial_value="-", disabled=True)
-
-        logger.info("🌐 viser viewer 已启动: %s (浏览器打开此 URL)", self.url)
+        try:
+            import viser
+            self._server = viser.ViserServer(host="0.0.0.0", port=port)
+            with self._server.gui.add_folder("📊 进度"):
+                self.ep_text = self._server.gui.add_text("Episode", initial_value="-/-", disabled=True)
+                self.step_text = self._server.gui.add_text("Step", initial_value="-/-", disabled=True)
+                self.instr_text = self._server.gui.add_text("指令", initial_value="(初始化中...)", disabled=True)
+            with self._server.gui.add_folder("🤖 状态"):
+                self.base_vel_text = self._server.gui.add_text("Base vel (m/s)", initial_value="-", disabled=True)
+                self.action_text = self._server.gui.add_text("关节目标范围", initial_value="-", disabled=True)
+            logger.info("🌐 Viser 文本 viewer 已启动: %s", self.url)
+        except ImportError:
+            logger.warning("viser 未安装, 跳过浏览器 viewer")
 
     def update(self, ep: int, total_ep: int, step: int, total_step: int,
                instruction: str, base_vel=None, joint_targets=None) -> None:
-        self.ep_text.value = f"{ep+1}/{total_ep}"
-        self.step_text.value = f"{step}/{total_step}"
-        self.instr_text.value = instruction
-        if base_vel is not None and len(base_vel) >= 3:
-            vx, vy, vz = float(base_vel[0]), float(base_vel[1]), float(base_vel[2])
-            self.base_vel_text.value = f"({vx:+.2f}, {vy:+.2f}, {vz:+.2f})"
-        if joint_targets is not None and len(joint_targets) > 0:
-            jt = np.asarray(joint_targets)
-            self.action_text.value = f"[{jt.min():.2f}, {jt.max():.2f}]"
+        if self._viewer_3d is not None:
+            self._viewer_3d.update()
+
+        if self._server is not None:
+            try:
+                if hasattr(self, 'ep_text'):
+                    self.ep_text.value = f"{ep+1}/{total_ep}"
+                    self.step_text.value = f"{step}/{total_step}"
+                    self.instr_text.value = instruction
+                if base_vel is not None and hasattr(self, 'base_vel_text') and len(base_vel) >= 3:
+                    vx, vy, vz = float(base_vel[0]), float(base_vel[1]), float(base_vel[2])
+                    self.base_vel_text.value = f"({vx:+.2f}, {vy:+.2f}, {vz:+.2f})"
+                if joint_targets is not None and hasattr(self, 'action_text') and len(joint_targets) > 0:
+                    jt = np.asarray(joint_targets)
+                    self.action_text.value = f"[{jt.min():.2f}, {jt.max():.2f}]"
+            except Exception:
+                pass
 
     def close(self) -> None:
-        try:
-            self.server.stop()
-        except Exception:
-            pass
+        if self._viewer_3d is not None:
+            self._viewer_3d.stop()
+        if self._server is not None:
+            try:
+                self._server.stop()
+            except Exception:
+                pass
 
 
 # ──────────────────────────────────────────────────────────────────────────# 数据收集
@@ -357,83 +351,40 @@ def collect_demonstrations(
     seed: int = 42,
     num_envs: int = 1,
     device: str = "auto",
-    # ─── 新增参数 ───
     agent: str = "scripted",
     checkpoint: str | None = None,
     action_mode: str = "delta",
     enable_video: bool = False,
     video_height: int = 224,
     video_width: int = 224,
-    video_fps: int = 0,  # 0 = auto (根据 dt 算), >0 = 显式 fps (GR00T 推荐 30)
+    video_fps: int = 0,
     camera_name: str | None = None,
     instruction_pool: list[str] | None = None,
-    viser: bool = False,  # 在浏览器里看数据采集进度 (默认关, 需 pip install viser)
+    viser: bool = False,
     viser_port: int = 8080,
-    ee_body: str | None = None,  # relative_eef 模式下的末端 body 名 (默认 G1: left_rubber_hand)
+    ee_body: str | None = None,
 ) -> str:
-    """在 unitree_rl_mjlab 仿真环境中收集机器人演示数据。
-
-    使用 unitree_rl_mjlab 的 ManagerBasedRlEnv 创建仿真环境，
-    配合 (脚本化 / 训练好的 / 随机的) 策略产生演示。
-    数据格式兼容 GR00T fine-tune 管线 (LeRobot v2)。
-
-    Args:
-        task_id: unitree_rl_mjlab 任务 ID (e.g. "Unitree-G1-Flat")
-        num_episodes: 收集 episode 数量
-        episode_length: 每个 episode 的时间步数
-        instruction: 默认语言指令 (每个 episode 从 instruction_pool 随机选)
-        output_dir: 输出目录
-        show_viewer: 是否显示可视化 (需要 DISPLAY)
-        speed: 步态速度 (仅 scripted 模式)
-        seed: 随机种子
-        num_envs: 仿真环境数量 (数据收集时强制为 1; 多环境会增加显存)
-        device: 计算设备 ("auto", "cuda:0", "cpu")
-        agent: 策略类型
-            - "scripted": 正弦步态 (无需 checkpoint)
-            - "random": 随机关节目标 (无需 checkpoint)
-            - "zero": 零动作 (无需 checkpoint)
-            - "trained": 用 PPO checkpoint 回放 (必须指定 --checkpoint)
-        checkpoint: PPO checkpoint 路径 (.pt 文件), trained 模式必填
-        action_mode: 动作空间
-            - "absolute": 关节目标绝对位置 (mjlab JointPositionAction 直接吃)
-            - "delta": 关节目标相对当前位置的增量 (⭐ GR00T N1.7 推荐)
-            - "relative_eef": 末端位姿增量 (G1 操作任务)
-        enable_video: 是否采集 RGB 视频 (mjlab offscreen render)
-        video_height / video_width: 视频分辨率 (默认 224x224 匹配 GR00T)
-        video_fps: 视频帧率 (默认 0 = 根据仿真 dt 自动算, 通常 30~50fps;
-                            设为 30 等可显式控制, GR00T 训练推荐 30)
-        camera_name: mjlab camera name (None = 用 unitree_rl_mjlab 默认 front_view)
-        instruction_pool: 备选指令列表 (每 episode 随机抽一个, 增加数据多样性)
-
-    Returns:
-        output_dir: 输出目录路径
-    """
-    # 延迟导入 torch (在没有 mjlab 的回退模式下不需要)
-    # 4. 设备选择 (提前) ────────────────────────────────────────
+    """在 unitree_rl_mjlab 仿真环境中收集机器人演示数据。"""
     if device == "auto":
         try:
             import torch as _torch
             device = "cuda:0" if _torch.cuda.is_available() else "cpu"
         except ImportError:
             device = "cpu"
-            logger.warning("torch 未安装, 使用 CPU (无法加载 mjlab 仿真)")
+            logger.warning("torch 未安装, 使用 CPU")
 
-    # ── 1. 确定机器人类型 ──────────────────────────────────────────────
     robot = TASK_TO_ROBOT.get(task_id)
     if robot is None:
         raise ValueError(
             f"不支持的任务: {task_id}\n"
             f"可选: {list(TASK_TO_ROBOT.keys())}"
         )
-
-    # ── 2. 加载机器人配置 ──────────────────────────────────────────────
     if robot == "g1":
         from configs.g1_config import (
             G1_NUM_JOINTS, G1_DEFAULT_JOINT_ANGLES, G1_DT, G1_JOINT_NAMES,
             G1_23DOF_NUM_JOINTS, G1_23DOF_DEFAULT_JOINT_ANGLES,
             G1_23DOF_JOINT_NAMES, G1_23DOF_DT,
         )
-        # 修复: 23Dof 变种 (Unitree-G1-23Dof-Flat/Rough) 关节数是 23 不是 29
         is_23dof = "23Dof" in task_id
         if is_23dof:
             num_joints = G1_23DOF_NUM_JOINTS
@@ -450,22 +401,12 @@ def collect_demonstrations(
             )
             dt = G1_DT
     else:
-        # 修复: 非 G1 机器人 (Go2/A2/As2/R1/H1_2/H2) 的 num_joints
-        # 从 unitree_rl_mjlab MJCF 统计 (4足 ~12, 人形 24-30)
         from configs.go2_config import GO2_NUM_JOINTS, GO2_DT
-        # 关节数查表 (来源: unitree_rl_mjlab/src/assets/robots/*/xmls/*.xml)
         robot_joint_counts = {
-            "go2": 12,    # go2.xml: 12 joints
-            "a2":  12,    # a2.xml: 12 joints (四足)
-            "as2": 12,    # as2.xml: 12 joints
-            "r1":  24,    # r1.xml: 24 joints (人形)
-            "h1_2": 27,   # h1_2.xml: 27 joints
-            "h2":  29,    # h2.xml: 29 joints (近似, 实际可能有 free-joint 折算)
+            "go2": 12, "a2": 12, "as2": 12,
+            "r1": 24, "h1_2": 27, "h2": 29,
         }
         num_joints = robot_joint_counts.get(robot, GO2_NUM_JOINTS)
-        # 通用 default_angles: 全 0 (mjlab reset 时会用实际 HOME_KEYFRAME 覆盖)
-        # 注意: 脚本化步态的初始姿态是 0, mjlab 接管后会用 entity 的 default_joint_pos
-        # 对于 random/zero agent, 不需要 default_angles
         default_angles = np.zeros(num_joints, dtype=np.float32)
         dt = GO2_DT
 
@@ -491,17 +432,14 @@ def collect_demonstrations(
     logger.info("  输出: %s", output_dir)
     logger.info("=" * 60)
 
-    # ── 4. 使用 unitree_rl_mjlab 创建仿真环境 ─────────────────────────
-    env_raw = None  # ManagerBasedRlEnv (有 observation_manager / render)
-    env_wrapped = None  # RslRlVecEnvWrapper (供 PPO policy 使用)
-    policy_fn: Callable | None = None  # trained 模式下: (obs) → action tensor
+    env_raw = None
+    env_wrapped = None
+    policy_fn: Callable | None = None
     use_mjlab = False
-    viewer = None  # 修复: 提前初始化, 避免 mjlab 失败时 UnboundLocalError
+    viewer = None
 
     try:
-        # unitree_rl_mjlab 通过 mjlab.tasks.registry 加载任务
-        # 需要先 import src.tasks 以触发任务注册
-        import torch as _torch  # noqa: F401 (确认 torch 可用)
+        import torch as _torch
         rl_mjlab_root = Path(__file__).resolve().parent.parent / "unitree_rl_mjlab"
         if rl_mjlab_root.exists() and str(rl_mjlab_root) not in sys.path:
             sys.path.insert(0, str(rl_mjlab_root))
@@ -510,23 +448,15 @@ def collect_demonstrations(
         from mjlab.envs import ManagerBasedRlEnv
         from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 
-        # 触发任务注册 (import unitree_rl_mjlab 的 src 包)
         import src.tasks  # noqa: F401
 
-        # 加载任务配置 — 修正: 官方 API 是 play=True (用于 inference / 收集)
         env_cfg = load_env_cfg(task_id, play=True)
-        # 数据收集强制单环境 (multi-env 会破坏 episode 边界)
         env_cfg.scene.num_envs = 1
 
-        # 视频 / 渲染配置
         if enable_video:
             env_cfg.viewer.width = video_width
             env_cfg.viewer.height = video_height
-            # 注: mjlab ViewerConfig 不暴露 camera_name 字段
-            # 仿真默认相机名以资产定义为准, 这里只能调整 lookat/distance/elevation/azimuth
-            # 如需定制, 请在 unitree_rl_mjlab 的任务 env_cfg 中修改 ViewerConfig
 
-        # ─── 创建原始 env (用于获取 per-key obs / state / 渲染) ───
         render_mode = "rgb_array" if enable_video else None
         env_raw = ManagerBasedRlEnv(
             cfg=env_cfg, device=device, render_mode=render_mode
@@ -535,15 +465,12 @@ def collect_demonstrations(
                     device, render_mode or "off")
         use_mjlab = True
 
-        # ─── viser 浏览器 viewer (可选, --viser 启用) ───────────
-        viewer = None
         if viser:
             try:
-                viewer = ViserViewer(port=viser_port)
+                viewer = ViserViewer(env=env_raw, port=viser_port)
             except ImportError:
-                logger.warning("viser 未安装, 跳过浏览器 viewer (pip install viser)")
+                logger.warning("viser 未安装, 跳过浏览器 viewer")
 
-        # ─── 如果是 trained 模式, 加载 PPO 策略 ───
         if agent == "trained":
             if not checkpoint or not Path(checkpoint).exists():
                 raise FileNotFoundError(
@@ -553,19 +480,13 @@ def collect_demonstrations(
                 )
 
             agent_cfg = load_rl_cfg(task_id)
-            # 包装成 VecEnv (policy 需要)
             env_wrapped = RslRlVecEnvWrapper(env_raw, clip_actions=agent_cfg.clip_actions)
 
-            # 注: load_runner_cls 访问 _REGISTRY[task_name].runner_cls, 未知任务会 KeyError。
-            # mjlab 的 load_runner_cls 本身能返回 None (表示走默认 OnPolicyRunner),
-            # 因此只需包一层 try/except 处理未注册任务场景。
             try:
                 runner_cls = load_runner_cls(task_id)
             except KeyError:
                 runner_cls = None
             runner_cls = runner_cls or MjlabOnPolicyRunner
-            # 修复: 统一用 dataclasses.asdict 转换 (兼容 frozen dataclass)
-            # 旧 _asdict_safe 在递归时可能漏字段, asdict 才是 mjlab 官方推荐的写法
             from dataclasses import asdict
             try:
                 train_cfg_dict = asdict(agent_cfg)
@@ -590,33 +511,29 @@ def collect_demonstrations(
         logger.debug("Traceback:\n%s", traceback.format_exc())
         logger.info("回退到纯数据模式 (使用 %s 生成器 + 模拟物理)", agent)
 
-    # ── 5. 收集数据 ───────────────────────────────────────────────────
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     rng = np.random.RandomState(seed)
 
-    # 准备可选的视频编码器 (懒加载, 缺 imageio 时优雅降级)
     imageio = None
     if enable_video:
         try:
-            import imageio.v2 as imageio  # type: ignore
+            import imageio.v2 as imageio
             logger.info("✅ imageio 可用, 将保存 mp4 视频")
         except ImportError:
             try:
-                import imageio  # type: ignore
+                import imageio
                 logger.info("✅ imageio (v1) 可用, 将保存 mp4 视频")
             except ImportError:
-                logger.warning("⚠️ imageio 未安装, 视频将保存为 npz 帧序列 (后期 convert 时再编码)")
+                logger.warning("⚠️ imageio 未安装, 视频将保存为 npz 帧序列")
                 imageio = None
 
-    # 准备指令池
     if instruction_pool:
         logger.info("  指令池: %d 条", len(instruction_pool))
     else:
         instruction_pool = [instruction]
 
-    # 状态维度元数据 (用于 modality.json)
-    state_dim = num_joints * 2 + 3 + 4 + 3 + 3  # 71 / 37
+    state_dim = num_joints * 2 + 3 + 4 + 3 + 3
     if robot == "g1":
         from configs.g1_config import G1_VIDEO_HEIGHT, G1_VIDEO_WIDTH, G1_VIDEO_KEY
         video_height = video_height or G1_VIDEO_HEIGHT
@@ -628,14 +545,12 @@ def collect_demonstrations(
         video_width = video_width or GO2_VIDEO_WIDTH
         video_key = GO2_VIDEO_KEY
 
-    # relative_eef 模式的 EE body 名 (修复: 不再 hard-code 零向量)
-    action_mode_ee_body = ee_body  # None 时 G1 默认 "left_rubber_hand", Go2 不支持
+    action_mode_ee_body = ee_body
     if action_mode == "relative_eef" and robot != "g1":
-        logger.warning("relative_eef 模式仅 G1 有末端执行器, Go2 数据将为零 (用于调试)")
+        logger.warning("relative_eef 模式仅 G1 有末端执行器, Go2 数据将为零")
     elif action_mode == "relative_eef" and action_mode_ee_body is None:
         action_mode_ee_body = "left_rubber_hand"
-        logger.info("relative_eef 模式默认 EE body: %s (可用 --ee-body 覆盖)",
-                    action_mode_ee_body)
+        logger.info("relative_eef 模式默认 EE body: %s", action_mode_ee_body)
 
     for ep in range(num_episodes):
         ep_speed = speed * rng.uniform(0.8, 1.2)

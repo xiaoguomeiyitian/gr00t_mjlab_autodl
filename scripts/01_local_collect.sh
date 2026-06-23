@@ -49,7 +49,8 @@ INSTRUCTION="walk forward"
 SPEED=0.5
 SEED=42
 AGENT_TYPE="scripted"       # scripted | random | zero | trained
-ACTION_MODE="absolute"      # absolute | delta | relative_eef (relative_eef 仅 G1)
+ACTION_MODE="delta"         # ← 修复: 默认改为 delta (与 README 推荐对齐, GR00T 官方最佳实践)
+                            #   absolute|delta|relative_eef (relative_eef 仅 G1)
 ENABLE_VIDEO=true           # 采集 RGB 视频 (GR00T 必需)
 VIDEO_HEIGHT=224
 VIDEO_WIDTH=224
@@ -94,7 +95,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --checkpoint PATH       trained agent PPO checkpoint (.pt)"
             echo ""
             echo "动作空间 (GR00T fine-tune 用):"
-            echo "  --action-mode MODE      absolute|delta|relative_eef (默认 absolute)"
+            echo "  --action-mode MODE      absolute|delta|relative_eef (默认 delta ⭐ GR00T 推荐)"
             echo "  注: relative_eef 仅 G1 (需 6D EEF), delta 推荐用于 locomotion"
             echo ""
             echo "视频:"
@@ -103,8 +104,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --video-width W         默认 224"
             echo "  --video-fps N           默认 30"
             echo ""
-            echo "浏览器 viewer (可选, 需 pip install viser):"
-            echo "  --viser                 启动 viser 浏览器 viewer (显示 episode / 步数 / 指令 / base vel)"
+            echo "浏览器 3D 可视化 (可选, 需 pip install viser):"
+            echo "  --viser                 启动 Viser 浏览器 3D viewer (实时显示机器人运动 + 进度)"
             echo "  --viser-port N          端口 (默认 8080)"
             exit 0
             ;;

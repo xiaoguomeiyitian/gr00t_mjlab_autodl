@@ -43,8 +43,6 @@ SSH_PORT=""
 LOCAL_MODEL_DIR="$PROJECT_ROOT/models"
 EXTRACT_DIR="$PROJECT_ROOT/models"
 SKIP_VERIFY=false
-INCLUDE_INT4=true          # 默认下载 INT4 量化模型
-INCLUDE_FP16=true          # 默认下载 BF16 完整模型
 
 # 默认行为 (v2 优化版):
 #   - BF16 完整模型: 默认下载 (本地需要用于推理/转换)

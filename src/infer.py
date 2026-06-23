@@ -54,6 +54,9 @@ class GR00TLocalInference:
         action_horizon: int = 16,
         execution_horizon: int = 1,
         task_id: str | None = None,
+        instruction: str = "walk forward",   # ← 修复: P0 bug, 默认值与 run_inference_loop 一致
+        viser: bool = False,
+        viser_port: int = 8080,
     ):
         self.model_path = model_path
         self.robot = robot
@@ -68,6 +71,11 @@ class GR00TLocalInference:
         self.task_id = task_id or (
             "Unitree-G1-Flat" if robot == "g1" else "Unitree-Go2-Flat"
         )
+        # ← 修复: 实例化时即存 instruction, 避免 _build_policy_observation 永远回退到 "walk forward"
+        self.instruction = instruction
+        self._viser = viser
+        self._viser_port = viser_port
+        self._viewer = None  # AsyncViser3DViewer 实例
 
         # Action chunking 队列 (缓存 GR00T 输出的多步动作)
         self._action_queue: list[np.ndarray] = []
@@ -191,11 +199,14 @@ class GR00TLocalInference:
         }
 
         # ── language ──
-        # 需要与 ModalityConfig.language.modality_keys[0] 一致
+        # 修复: P0 bug — 旧代码从 obs.get() 取 instruction, 但 obs 不含该字段,
+        #       导致永远回退到 "walk forward", 用户传的 --instruction 被静默忽略
+        # 现在用 self.instruction (由 __init__ 或 run_inference_loop 写入)
         lang_key = self._policy.language_key
+        # 兼容: 仍允许 obs 覆盖 (e.g. 数据回放场景每 step 有不同 instruction)
         instruction = obs.get(
             "annotation.language.action_text",
-            obs.get("instruction", "walk forward"),
+            obs.get("instruction", self.instruction),   # ← 修复: 默认用 self.instruction
         )
         language = {lang_key: [[str(instruction)]]}
 
@@ -287,6 +298,8 @@ class GR00TLocalInference:
             max_steps: 最大步数
             show_viewer: 是否显示 mjlab 可视化
         """
+        # ← 修复: P0 bug — 必须写到 self.instruction, 否则 _build_policy_observation 看不到
+        self.instruction = instruction
         logger.info("=" * 60)
         logger.info("GR00T 本地推理 (基于 unitree_rl_mjlab)")
         logger.info("  指令: %s", instruction)
@@ -324,6 +337,18 @@ class GR00TLocalInference:
             logger.warning("mjlab 环境创建失败: %s", e)
             logger.info("回退到纯推理模式 (无物理仿真)")
             env = None
+
+        # ─── viser 3D viewer (可选) ──────────────────────────────────
+        if self._viser and env is not None:
+            try:
+                from viser_3d_viewer import AsyncViser3DViewer
+                self._viewer = AsyncViser3DViewer(env=env, port=self._viser_port)
+                self._viewer.start()
+                logger.info("🌐 Viser 3D viewer: %s", self._viewer.url)
+            except ImportError:
+                logger.warning("viser_3d_viewer 未安装, 跳过 3D 可视化")
+            except Exception as e:
+                logger.warning("Viser 3D viewer 启动失败: %s", e)
 
         # ── 推理循环 ─────────────────────────────────────────────────
         # 懒加载共享渲染 + obs 工具
@@ -368,10 +393,16 @@ class GR00TLocalInference:
                     if step == 0:
                         logger.debug("env.step 失败: %s", e)
 
+            # ── viser 3D 更新 ─────────────────────────────────────
+            if self._viewer is not None:
+                self._viewer.update()
+
             if (step + 1) % 50 == 0:
                 logger.info("推理进度: %d/%d", step + 1, max_steps)
 
-        # 关闭环境
+        # 关闭 viewer + 环境
+        if self._viewer is not None:
+            self._viewer.stop()
         if env is not None:
             try:
                 env.close()
@@ -486,6 +517,10 @@ def main():
                         help="(历史参数, 已忽略 — 推理 dtype 由模型保存时决定)")
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--show-viewer", action="store_true")
+    parser.add_argument("--viser", action="store_true",
+                        help="启用 Viser 浏览器 3D 可视化 (默认端口 8080)")
+    parser.add_argument("--viser-port", type=int, default=8080,
+                        help="Viser 服务器端口 (默认: 8080)")
     parser.add_argument("--execution-horizon", type=int, default=1,
                         help="Action chunking: 每次 GR00T 输出 16 步动作, "
                              "顺序执行前 N 步再重新规划 (1=每步规划; 16=完整 chunking)")
@@ -498,6 +533,9 @@ def main():
         device=args.device,
         execution_horizon=args.execution_horizon,
         task_id=args.task,
+        instruction=args.instruction,   # ← 修复: 透传到实例
+        viser=args.viser,
+        viser_port=args.viser_port,
     )
     inference.run_inference_loop(
         instruction=args.instruction,

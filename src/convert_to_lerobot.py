@@ -323,7 +323,7 @@ def convert(
         }
 
     # 确定 action_mode / robot 元数据
-    action_mode = action_mode or metadata.get("action_mode", "delta")
+    action_mode = action_mode or metadata.get("action_mode", "delta")  # ← 修复: 默认 delta (与 01 脚本对齐)
     if action_mode not in ("absolute", "delta", "relative_eef"):
         logger.warning("未知 action_mode '%s', 回退 delta", action_mode)
         action_mode = "delta"
@@ -372,6 +372,24 @@ def convert(
     with open(meta_dir / "modality.json", "w") as f:
         json.dump(modality, f, indent=2, ensure_ascii=False)
     logger.info("✅ 写入 meta/modality.json")
+
+    # ── 1.5 一致性校验: modality.action 关键 key 必须与 action_mode 语义匹配 ──
+    # 防止采集端用 --action-mode delta, 但误用 absolute config (或反之)
+    expected_action_keys = {
+        "absolute":     ["joint_position_target"],
+        "delta":        ["joint_position_delta"],
+        "relative_eef": ["ee_pose_delta"],
+    }
+    actual_action_keys = list(modality.get("action", {}).keys())
+    expected = expected_action_keys.get(action_mode, [])
+    if expected and not any(k in actual_action_keys for k in expected):
+        # ← 修复: 这是软警告, 不阻断流程, 但训练会失败. 给用户明确提示
+        logger.warning(
+            "⚠️  modality.action 关键 key 与 action_mode 不一致! "
+            "action_mode=%s 期望含 %s, 实际含 %s. "
+            "训练时 LeRobot loader 会找不到对应 joint group, 请检查 ModalityConfig.",
+            action_mode, expected, actual_action_keys,
+        )
 
     # ── 2. 找出所有 episode npz ─────────────────────────────────────────
     episodes = sorted(data_path.glob("episode_*.npz"))

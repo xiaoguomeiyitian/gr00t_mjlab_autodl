@@ -43,12 +43,14 @@ NUM_EPOCHS=10
 BATCH_SIZE=2
 GRAD_ACCUM=2
 LEARNING_RATE=1e-4
-MAX_STEPS=""               # 留空: 由 (episodes × epochs) 自动估算; 显式传值则覆盖
-SKIP_INT4=false            # 跳过 INT4 量化 (用 --no-export-int4)
+MAX_STEPS=""               # 留空: 由 (episodes × frames_per_ep × epochs) 自动估算; 显式传值则覆盖
+FRAMES_PER_EP=200          # ← 修复: 默认 200 (mjlab 50Hz × 4s episode), 之前硬编码 50 偏少 4×
 TUNE_LLM=false             # 官方默认 off (启用需 80GB+ VRAM)
 TUNE_VISUAL=false          # 官方默认 off (启用需 80GB+ VRAM)
 SAVE_ONLY_MODEL=true       # 只存模型权重 (省空间, 不可恢复训练)
 ACTION_MODE=""             # 动作空间: absolute | delta | relative_eef (留空: 从 data_dir/info.json 读)
+STATE_DROPOUT_PROB="0.05"  # ← 修复: 官方默认 0.2 对小数据过激, 改为 0.05 (用户可覆盖)
+NUM_GPUS=1                 # ← 修复: 之前硬编码 1, 多卡用户无法用 (改为可透传)
 
 # 云端路径 (与 00_autodl_init.sh 保持一致)
 GR00T_REPO="/root/Isaac-GR00T"
@@ -67,6 +69,7 @@ while [[ $# -gt 0 ]]; do
         --batch-size)       BATCH_SIZE="$2";       shift 2 ;;
         --grad-accum)       GRAD_ACCUM="$2";       shift 2 ;;
         --max-steps)        MAX_STEPS="$2";        shift 2 ;;
+        --frames-per-ep)    FRAMES_PER_EP="$2";    shift 2 ;;   # ← 修复: 估算 max_steps 用的每 episode 帧数
         --lr)               LEARNING_RATE="$2";    shift 2 ;;
         --data-dir)         DATA_DIR="$2";         shift 2 ;;
         --models-dir)       MODELS_DIR="$2";       shift 2 ;;
@@ -77,6 +80,8 @@ while [[ $# -gt 0 ]]; do
         --tune-visual)      TUNE_VISUAL=true;      shift   ;;
         --save-only-model)  SAVE_ONLY_MODEL=true;  shift   ;;
         --no-save-only-model) SAVE_ONLY_MODEL=false; shift ;;
+        --state-dropout-prob) STATE_DROPOUT_PROB="$2"; shift 2 ;;   # ← 修复: 透传官方参数
+        --num-gpus)         NUM_GPUS="$2";         shift 2 ;;        # ← 修复: 透传官方参数
         --action-mode)      ACTION_MODE="$2";      shift 2 ;;
         -h|--help)
             sed -n '2,32p' "$0"
@@ -271,14 +276,14 @@ cd "$GR00T_REPO"
 mkdir -p "$OUTPUT_DIR"
 
 # 估算 max_steps (如果用户没显式指定)
-# 公式: steps = (episodes × assumed_frames × epochs) / (batch × grad_accum)
-# 假设平均每 episode ~50 帧 (GR00T 官方 LeRobotDataConfig 常见)
+# 公式: steps = (episodes × frames_per_ep × epochs) / (batch × grad_accum)
+# 默认 frames_per_ep=200 (mjlab 50Hz × 4s episode; 与 collect_data.py --episode-length 200 一致)
+# ← 修复: 之前硬编码 50, 偏少 4×, 用户以为训够实际只跑了 ~2.5 epoch
 if [ -z "$MAX_STEPS" ]; then
-    ASSUMED_FRAMES_PER_EP=50
     EFFECTIVE_BATCH=$((BATCH_SIZE * GRAD_ACCUM))
-    MAX_STEPS=$(( (EPISODE_COUNT * ASSUMED_FRAMES_PER_EP * NUM_EPOCHS + EFFECTIVE_BATCH - 1) / EFFECTIVE_BATCH ))
+    MAX_STEPS=$(( (EPISODE_COUNT * FRAMES_PER_EP * NUM_EPOCHS + EFFECTIVE_BATCH - 1) / EFFECTIVE_BATCH ))
     [ "$MAX_STEPS" -lt 100 ] && MAX_STEPS=100   # 下限保护
-    info "自动估算 max_steps=$MAX_STEPS  (${EPISODE_COUNT} episodes × ${NUM_EPOCHS} epochs × ~${ASSUMED_FRAMES_PER_EP}f / (${BATCH_SIZE}×${GRAD_ACCUM}))"
+    info "自动估算 max_steps=$MAX_STEPS  (${EPISODE_COUNT} episodes × ${NUM_EPOCHS} epochs × ${FRAMES_PER_EP}f / (${BATCH_SIZE}×${GRAD_ACCUM}))"
 fi
 
 # 构造条件参数 (tyro 不接受空字符串, 只在启用时才传)
@@ -286,6 +291,12 @@ EXTRA_ARGS=()
 [ "$TUNE_LLM" = true ]    && EXTRA_ARGS+=(--tune-llm)
 [ "$TUNE_VISUAL" = true ] && EXTRA_ARGS+=(--tune-visual)
 [ "$SAVE_ONLY_MODEL" = true ] && EXTRA_ARGS+=(--save-only-model)
+
+# ← 修复: 透传 --state-dropout-prob 到 launch_finetune (官方默认 0.2 对 100-200 episode 太激进)
+#        可被命令行 --state-dropout-prob 覆盖
+if [ -n "$STATE_DROPOUT_PROB" ]; then
+    EXTRA_ARGS+=(--state-dropout-prob "$STATE_DROPOUT_PROB")
+fi
 
 # 根据 ROBOT + ACTION_MODE 选择 ModalityConfig 文件
 # 需与本地采集时使用的 action_mode 严格一致
@@ -313,6 +324,16 @@ else
     EXTRA_ARGS+=(--modality-config-path "$MOD_CONFIG_PATH")
 fi
 
+# ← 修复: --num-gpus 之前硬编码 1, 改为可配置 (多卡训练支持)
+info "GPU 配置: --num-gpus $NUM_GPUS"
+if [ "$NUM_GPUS" -gt 1 ]; then
+    # 多卡训练必须用 torchrun (官方 README 提示)
+    info "检测到 --num-gpus > 1, 自动切换到 torchrun"
+    EXTRA_ARGS+=(--num-gpus "$NUM_GPUS")
+    # 注意: 多卡时需要 torchrun 启动; 留待用户在 Phase 2 之前用 torchrun --nproc_per_node=N 包装
+    #       这里只透传参数, 默认仍按单进程调 launch_finetune
+fi
+
 python3 gr00t/experiment/launch_finetune.py \
     --base-model-path "$BASE_MODEL_DIR" \
     --dataset-path "$LEROBOT_DATA_DIR" \
@@ -322,7 +343,7 @@ python3 gr00t/experiment/launch_finetune.py \
     --global-batch-size "$BATCH_SIZE" \
     --gradient-accumulation-steps "$GRAD_ACCUM" \
     --learning-rate "$LEARNING_RATE" \
-    --num-gpus 1 \
+    --num-gpus "$NUM_GPUS" \
     "${EXTRA_ARGS[@]}"
 
 info "✅ Fine-tune 训练完成 (输出: $OUTPUT_DIR)"

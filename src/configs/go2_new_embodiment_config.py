@@ -49,6 +49,7 @@ go2_delta_config = {
                 rep=ActionRepresentation.RELATIVE,
                 type=ActionType.NON_EEF,
                 format=ActionFormat.DEFAULT,
+                state_key="joint_pos",   # ← 修复: 同 G1, 不加则 generate_rel_stats 崩溃
             ),
         ],
     ),
