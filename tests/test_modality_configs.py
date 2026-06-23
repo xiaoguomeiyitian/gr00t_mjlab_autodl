@@ -66,7 +66,7 @@ class TestG1DeltaConfig:
         assert cfg["rep"].endswith("RELATIVE"), f"got {cfg['rep']}"
 
     def test_state_key_is_joint_pos(self, cfg):
-        """P0 bug 修复: 必须有 state_key='joint_pos' 才能生成 relative_stats.json."""
+        """必须有 state_key='joint_pos' 才能生成 relative_stats.json。"""
         assert cfg["state_key"] == "joint_pos"
 
     def test_state_key_in_state_modality_keys(self, cfg):

@@ -2,19 +2,7 @@
 """
 数据收集器 — 基于 unitree_rl_mjlab 官方仿真环境收集 G1/Go2 演示数据。
 
-**真实可用的 GR00T 训练数据采集**:
-  - 模式 1: --agent scripted   (正弦步态生成器, 用于 CI / smoke test)
-  - 模式 2: --agent random     (随机关节目标, 用于 sanity check)
-  - 模式 3: --agent trained    ⭐ 用训练好的 PPO 策略回放当专家示教
-  - 模式 4: --agent zero       (零动作, 用于验证管线)
-  - 模式 5: --agent keyboard   (手动遥操, 可选, 需要 display)
-
-**真实视觉采集**: --video 启用 mjlab rgb_array 渲染, 每个 episode 输出 mp4
-
-**动作空间**:
-  - --action-mode absolute     关节目标绝对位置 (与 mjlab JointPositionActionCfg 一致)
-  - --action-mode delta        ⭐ 关节目标相对当前增量 (GR00T N1.7 推荐)
-  - --action-mode relative_eef 末端执行器位姿增量 (仅 G1 操作任务)
+支持 4 种 Agent (scripted/random/zero/trained) 和 3 种动作空间 (absolute/delta/relative_eef)。
 
 依赖:
   - unitree_rl_mjlab (pip install -e ../unitree_rl_mjlab)
@@ -31,7 +19,7 @@
     # 1) Smoke test: 脚本化步态, 不开视频, 10 个 episode
     python collect_data.py --agent scripted --num-episodes 10
 
-    # 2) ⭐ 真实训练数据: 用 PPO 策略回放, 开启视频, 100 episode
+    # 2) 真实训练数据: 用 PPO 策略回放, 开启视频, 100 episode
     python collect_data.py --agent trained \\
         --checkpoint ../unitree_rl_mjlab/logs/rsl_rl/g1_velocity/<run>/model_*.pt \\
         --task Unitree-G1-Flat --num-episodes 100 --video
@@ -108,7 +96,6 @@ def gait_generator_g1(
 ) -> np.ndarray:
     """G1 步态生成器 — 产生 29 维 (默认) 或 23 维关节目标。
 
-    简单正弦步态: 双腿交替迈步，手臂自然摆动，腰部保持平衡。
     关节顺序与 unitree_rl_mjlab MJCF (g1.xml / g1_23dof.xml) 一致。
     """
     t = step_idx * dt
@@ -167,7 +154,6 @@ def gait_generator_go2(
 ) -> np.ndarray:
     """Go2 步态生成器 — 产生 12 维关节目标。
 
-    经典 trot 步态: 对角腿同步。
     关节顺序与 unitree_rl_mjlab MJCF (go2.xml) 一致。
     """
     t = step_idx * dt
@@ -202,8 +188,6 @@ def gait_generator_generic(
 ) -> np.ndarray:
     """通用脚本化步态 — 用于没有专门生成器的机器人 (A2/R1/H1_2/H2/As2).
 
-    简单策略: 在 default 姿态上叠加正弦扰动, 用于 smoke test
-    真实训练数据请用 --agent trained + PPO checkpoint
     """
     if default_angles is None:
         targets = np.zeros(num_joints, dtype=np.float32)
@@ -273,7 +257,6 @@ def _get_viser_viewer():
 
 
 class ViserViewer:
-    """浏览器可视化: 3D 机器人运动 + 进度面板."""
 
     def __init__(self, env=None, port: int = 8080):
         self._viewer_3d = None
@@ -364,7 +347,6 @@ def collect_demonstrations(
     viser_port: int = 8080,
     ee_body: str | None = None,
 ) -> str:
-    """在 unitree_rl_mjlab 仿真环境中收集机器人演示数据。"""
     if device == "auto":
         try:
             import torch as _torch
@@ -582,8 +564,7 @@ def collect_demonstrations(
         for step_idx in range(episode_length):
             # ─── 1) 决定动作 ─────────────────────────────────────
             if agent == "scripted":
-                # 修复: 23Dof 变种需要传 num_joints=23 给 gait_generator
-                if robot == "g1":
+                        if robot == "g1":
                     joint_targets = gait_fn(step_idx, dt=dt, speed=ep_speed,
                                             command=ep_instruction,
                                             num_joints=num_joints)
@@ -611,7 +592,6 @@ def collect_demonstrations(
                 except Exception as e:
                     if step_idx == 0:
                         logger.debug("trained 策略推理失败, 回退 scripted: %s", e)
-                    # 修复: 同上, fallback 也要传 num_joints
                     if robot == "g1":
                         joint_targets = gait_fn(step_idx, dt=dt, speed=ep_speed,
                                                 command=ep_instruction,
@@ -621,7 +601,6 @@ def collect_demonstrations(
                                                 command=ep_instruction,
                                                 num_joints=num_joints)
             else:
-                # 修复: 同上
                 if robot == "g1":
                     joint_targets = gait_fn(step_idx, dt=dt, speed=ep_speed,
                                             command=ep_instruction,
@@ -632,8 +611,6 @@ def collect_demonstrations(
                                             num_joints=num_joints)
 
             # ─── 2) 推 mjlab 环境 (有的话) ─────────────────────────
-            # 注意: mjlab env.step() 内部已经自动处理 terminated env 的 reset
-            #       (调用 self._reset_idx(reset_env_ids)), 所以我们不需要再 reset
             obs_dict: dict[str, Any] = {}
             if use_mjlab and env_raw is not None:
                 try:
@@ -674,9 +651,7 @@ def collect_demonstrations(
                 base_lin_vel = base_lin_vel or blv
                 base_ang_vel = base_ang_vel or bav
 
-            # 维度修正: mjlab term `joint_pos` 的 func=mdp.joint_pos_rel, 内容是相对值
-            # 修复: 旧代码用 obs_dict.get("joint_pos_rel") is not None → 永远 False
-            #       (term 名是 "joint_pos" 不是 "joint_pos_rel"), 改用 obs_dict.get("joint_pos")
+            # mjlab 返回的是相对值, 还原为绝对值
             if obs_dict.get("joint_pos") is not None and joint_pos is not None:
                 # mjlab 返回的是 rel (=joint_pos - default), 还原为 abs
                 joint_pos = joint_pos + default_angles
@@ -693,8 +668,6 @@ def collect_demonstrations(
                     "action.joint_position_last": current_joint_pos.astype(np.float32),
                 }
             elif action_mode == "relative_eef":
-                # 修复: 用 mujoco forward kinematics 计算当前末端位姿,
-                #      然后减去上一时刻得到 7D delta (xyz + quat_wxyz)
                 if action_mode_ee_body is None and robot != "g1":
                     # Go2 没有末端执行器, 退到 zero (这是预期行为)
                     ee_pose_delta = np.zeros(7, dtype=np.float32)
@@ -854,8 +827,6 @@ def _get_per_key_obs(env_raw: Any) -> dict[str, Any]:
     这里直接通过 Entity.data 拿分组前的 dict (因为 mjlab ObservationManager
     默认 concatenate_terms=True, 没有 per-key 访问接口).
 
-    修复: 删除对 om.terms / om._terms 的尝试 (mjlab ObservationManager
-         无此属性, 是死代码; 直接走 Entity.data 即可).
     """
     out: dict[str, Any] = {}
     try:
@@ -885,8 +856,6 @@ def _render_frame(env_raw: Any, ep: int, step: int) -> np.ndarray | None:
       2) env.unwrapped.sim.mj_data   — 直接走 mujoco native offscreen (兼容)
       3) viser / native viewer (需 DISPLAY)
 
-    修复: 优先用 env.render() (它内部已封装 mjlab 的 OffscreenRenderer),
-         不再手造 mujoco.Renderer (复杂 + 容易出现 model/dim 不一致).
     """
     if env_raw is None:
         return None
@@ -936,9 +905,6 @@ def _simulate_observation(
     """
     t = step_idx * dt
 
-    # 修复: 用 joint_targets.shape[0] 而不是 num_joints
-    # 因为不同机器人的 default_angles 维度可能跟 num_joints 不一致
-    # (例如 H2 的 30 关节里只有 29 个 actuated)
     actual_dim = joint_targets.shape[0] if joint_targets is not None else num_joints
 
     # 模拟关节位置: 目标 + 小噪声
@@ -961,7 +927,6 @@ def _get_ee_pose(
 ) -> np.ndarray | None:
     """通过 mujoco forward kinematics 获取末端执行器当前位姿 (xyz + quat_wxyz).
 
-    修复: 用于 relative_eef 模式的真实 EE 增量计算 (替代旧的零向量 fallback)
 
     Args:
         env_raw: unitree_rl_mjlab ManagerBasedRlEnv (需 unwrapped.sim)
@@ -975,9 +940,7 @@ def _get_ee_pose(
         return None
     try:
         sim = env_raw.unwrapped.sim
-        # mjlab 修复: sim.mj_model / sim.mj_data 是原生 mujoco (有 .xpos/.xquat)
         #   sim.data / sim.model 是 Warp DataBridge/ModelBridge, 没有 .xpos
-        #   旧代码用 sim._data / sim._model → AttributeError (不存在)
         mj_model = sim.mj_model
         mj_data = sim.mj_data
         # 触发 forward kinematics 更新 (确保 xpos/xquat 是当前状态)
@@ -1001,7 +964,6 @@ def _get_ee_pose(
 def _quat_diff_wxyz(cur: np.ndarray, prev: np.ndarray) -> np.ndarray:
     """计算两个 wxyz 四元数的"相对旋转": cur * prev^{-1}.
 
-    修复: 用于 relative_eef 模式的姿态增量计算 (避免数值不稳定的"直接相减")
 
     Args:
         cur: 当前四元数 (4,) wxyz
@@ -1044,7 +1006,7 @@ def main():
   # 1) Smoke test: 脚本化步态, 不开视频
   python collect_data.py --agent scripted --num-episodes 10
 
-  # 2) ⭐ 真实训练数据: 用训练好的 PPO 策略 + 视频
+  # 2) 真实训练数据: 用训练好的 PPO 策略 + 视频
   python collect_data.py --agent trained \\
       --checkpoint ../unitree_rl_mjlab/logs/rsl_rl/g1_velocity/<run>/model_<iter>.pt \\
       --task Unitree-G1-Flat --num-episodes 100 --video
@@ -1090,7 +1052,7 @@ def main():
                         help="PPO checkpoint 路径 (.pt), --agent trained 必填")
     parser.add_argument("--action-mode", type=str, default="delta",
                         choices=["absolute", "delta", "relative_eef"],
-                        help="动作空间 (default: delta, ⭐ GR00T N1.7 推荐)")
+                        help="动作空间 (default: delta)")
     parser.add_argument("--video", action="store_true",
                         help="采集 RGB 视频 (mjlab offscreen render, 每 episode 一个 mp4)")
     parser.add_argument("--video-height", type=int, default=224,
@@ -1102,8 +1064,7 @@ def main():
                              "GR00T 训练推荐 30)")
     parser.add_argument("--camera-name", type=str, default=None,
                         help="mjlab camera name (None=默认 front_view; "
-                             "修复: 此选项目前无 effect, mjlab ViewerConfig 未暴露 "
-                             "camera_name 字段, 需在任务 env_cfg 中修改。")
+                             "camera_name 需在任务 env_cfg 中修改。")
     parser.add_argument("--viser", action="store_true",
                         help="启用 viser 浏览器可视化 (显示 episode 进度 / 步数 / "
                              "指令 / base velocity; 需 pip install viser)")

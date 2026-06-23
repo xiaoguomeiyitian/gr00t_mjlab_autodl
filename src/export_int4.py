@@ -2,22 +2,11 @@
 """
 INT4 量化导出 — 将 GR00T fine-tune 后的 BF16 完整模型量化为 INT4 (NF4 + double-quant)
 
-**纯后训练量化 (Post-Training Quantization)** —— 不需要重新训练,
-仅将 BF16 权重转换为 INT4 表示 (NF4 + double-quant), 8GB 显存即可完成。
+纯后训练量化 (PTQ)，不需要重新训练，8GB 显存即可完成。
 
-输入模式:
-  1) BF16 完整模型目录 (含 config.json + *.safetensors)  ⭐ 推荐
-  2) HuggingFace ID (默认 nvidia/GR00T-N1.7-3B) — 远程下载 + 量化
 
-> **说明**: Isaac-GR00T 官方训练不支持 LoRA (peft 是依赖但未使用),
-> 训练输出 OUTPUT_DIR 本身就是完整可推理模型, 无需 merge 步骤。
 
-使用方法:
-    # ⭐ 本地 BF16 完整模型 → INT4 (推荐, 无需联网)
-    python export_int4.py \\
-        --input-type fp16 \\
-        --model-dir /root/models/g1_gr00t \\
-        --output-dir /root/models/g1_gr00t_int4
+
 """
 
 from __future__ import annotations
@@ -123,21 +112,17 @@ def export_int4(
             logger.error("BF16 模型加载失败: %s", e)
             sys.exit(1)
 
-        # BF16 完整模型已含合并后的权重, 直接量化即可
-        model = base
+            model = base
         processor_source = str(model_path_obj)
 
     else:
-        # argparse choices 已限制 input_type 只能是 "auto" | "fp16", 此分支不可达
         logger.error("不支持的 input_type: %s", input_type)
         sys.exit(1)
     # ── 2. 保存 INT4 模型 ───────────────────────────────────────────────
     step("保存 INT4 量化模型...")
     model.save_pretrained(str(output_path))
 
-    # 保存 processor (优先从本地 BF16 模型读, 失败则从 HF 读)
-    # Gr00tPolicy 加载时会把 processor/ 子目录或根目录的 processor_config.json
-    # 都识别, 这里把 processor 文件直接落到模型根, 保持与官方约定一致
+    # 保存 processor
     try:
         proc = AutoProcessor.from_pretrained(
             processor_source,
@@ -174,7 +159,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  # ⭐ 本地 BF16 完整模型 → INT4 (推荐, 无需联网)
+  # 本地 BF16 完整模型 → INT4 (无需联网)
   python export_int4.py --input-type fp16 \\
       --model-dir models/g1_gr00t \\
       --output-dir models/g1_gr00t_int4
