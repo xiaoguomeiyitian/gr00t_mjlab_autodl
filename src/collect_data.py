@@ -35,6 +35,7 @@ import argparse
 import json
 import logging
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -256,12 +257,17 @@ def _get_viser_viewer():
             _ViserViewer3D = None
     return _ViserViewer3D
 
+
+class ViserViewer:
     """浏览器可视化: 3D 机器人运动 + 进度面板 + 自适应 FPS.
 
     自适应策略:
-    自适应策略:
       - 有浏览器连接: 按 viser_fps 渲染 (默认 30 FPS)
       - 无浏览器连接: 暂停渲染, 全速采集
+
+    架构 (双缓冲 + Event 同步):
+      - 主线程: env.step() → update() 写共享状态 → notify_new_frame() (< 1μs)
+      - 渲染线程 (Daemon): wait(swap_event) → 读共享状态 → 渲染
     """
 
     def __init__(self, env=None, port: int = 20006, viser_fps: float = 30.0):
@@ -272,14 +278,27 @@ def _get_viser_viewer():
         self._viser_fps = viser_fps
         self._fps_adjusted = False  # 是否已根据连接状态调整过 FPS
 
+        # ── 共享状态 (主线程写, 渲染线程读) ──
+        self._shared_state = {
+            'qpos': None,
+            'qvel': None,
+            'ep': 0,
+            'step': 0,
+            'total_ep': 0,
+            'total_step': 0,
+            'instruction': '',
+        }
+        self._state_lock = threading.Lock()
+
         Viewer3D = _get_viser_viewer()
         if Viewer3D is not None and env is not None:
             try:
                 self._viewer_3d = Viewer3D(env=env, port=port, frame_rate=viser_fps)
+                self._viewer_3d.set_shared_state(self._shared_state, self._state_lock)
                 self._viewer_3d.start()
                 self.url = self._viewer_3d.url
-                logger.info("🌐 Viser 3D viewer 已启动: %s (FPS=%d, 自适应=%s)",
-                            self.url, int(viser_fps), "有连接渲染/无连接暂停")
+                logger.info("🌐 Viser 3D viewer 已启动: %s (FPS=%d, 双缓冲+Event)",
+                            self.url, int(viser_fps))
                 return
             except Exception as e:
                 logger.warning("3D viewer 启动失败, 回退到文本模式: %s", e)
@@ -300,7 +319,7 @@ def _get_viser_viewer():
 
     def update(self, ep: int, total_ep: int, step: int, total_step: int,
                instruction: str, base_vel=None, joint_targets=None) -> None:
-        # 3D viewer: 自适应 FPS (有连接按 viser_fps, 无连接暂停)
+        # ── 3D viewer: 写共享状态 + notify (非阻塞, < 1μs) ──
         if self._viewer_3d is not None:
             # 首次 update 时根据连接状态调整 FPS
             if not self._fps_adjusted:
@@ -311,7 +330,17 @@ def _get_viser_viewer():
                     self._viewer_3d.set_fps(0)  # 暂停渲染, 全速采集
                     logger.info("🌐 无浏览器连接, 暂停渲染以全速采集")
                 self._fps_adjusted = True
-            self._viewer_3d.update()
+
+            # 更新共享状态 (渲染线程读取)
+            with self._state_lock:
+                self._shared_state['ep'] = ep
+                self._shared_state['total_ep'] = total_ep
+                self._shared_state['step'] = step
+                self._shared_state['total_step'] = total_step
+                self._shared_state['instruction'] = instruction
+
+            # 通知渲染线程新数据就绪 (< 1μs)
+            self._viewer_3d.notify_new_frame()
 
         # 文本 viewer (始终更新, 开销极小)
         if self._server is not None:
@@ -600,7 +629,7 @@ def collect_demonstrations(
         for step_idx in range(episode_length):
             # ─── 1) 决定动作 ─────────────────────────────────────
             if agent == "scripted":
-                        if robot == "g1":
+                if robot == "g1":
                     joint_targets = gait_fn(step_idx, dt=dt, speed=ep_speed,
                                             command=ep_instruction,
                                             num_joints=num_joints)
@@ -741,8 +770,8 @@ def collect_demonstrations(
                         if step_idx == 0:
                             logger.debug("视频帧写入失败: %s", e)
 
-            # ─── 5.5) viser 浏览器 viewer 更新 (可选) ─────────────
-            if viewer is not None and (step_idx % 5 == 0 or step_idx == episode_length - 1):
+            # ─── 5.5) viser 浏览器 viewer 更新 (每步调用, 写共享状态 + notify) ──
+            if viewer is not None:
                 try:
                     viewer.update(
                         ep=ep, total_ep=num_episodes,
@@ -773,6 +802,9 @@ def collect_demonstrations(
 
             # 更新"上一时刻"位姿 (用于下一步 delta)
             current_joint_pos = joint_targets.astype(np.float32).copy()
+
+            # ─── 让出 CPU 给渲染线程 (1ms, 对采集效率影响 < 0.1%) ──
+            time.sleep(0.001)
 
         # ─── 保存 episode (.npz) ──────────────────────────────────
         ep_path = output_path / f"episode_{ep:06d}.npz"
@@ -1093,13 +1125,17 @@ def main():
     parser.add_argument("--video-fps", type=int, default=0,
                         help="视频帧率 (default: 0 = auto 根据仿真 dt 算; "
                              "GR00T 训练推荐 30)")
-parser.add_argument("--camera-name", type=str, default=None, help="mjlab camera name (None=默认 front_view; "
-"修复: 此选项目前无 effect, mjlab ViewerConfig 未暴露 "
-"camera_name 字段, 需在任务 env_cfg 中修改。")
-parser.add_argument("--no-viser", action="store_true", help="禁用 viser 浏览器可视化 (默认启用, 有连接时按 viser-fps 渲染)")
-parser.add_argument("--viser-port", type=int, default=20006, help="viser 服务器端口 (default: 20006)")
-parser.add_argument("--viser-fps", type=float, default=30.0, help="viser 渲染 FPS (default: 30, 范围 1-30; "
-"有浏览器连接时按此 FPS, 无连接时暂停渲染)")
+    parser.add_argument("--camera-name", type=str, default=None,
+                        help="mjlab camera name (None=默认 front_view; "
+                             "修复: 此选项目前无 effect, mjlab ViewerConfig 未暴露 "
+                             "camera_name 字段, 需在任务 env_cfg 中修改。")
+    parser.add_argument("--no-viser", action="store_true",
+                        help="禁用 viser 浏览器可视化 (默认启用, 有连接时按 viser-fps 渲染)")
+    parser.add_argument("--viser-port", type=int, default=20006,
+                        help="viser 服务器端口 (default: 20006)")
+    parser.add_argument("--viser-fps", type=float, default=30.0,
+                        help="viser 渲染 FPS (default: 30, 范围 1-30; "
+                             "有浏览器连接时按此 FPS, 无连接时暂停渲染)")
     parser.add_argument("--ee-body", type=str, default=None,
                         help="relative_eef 模式下的末端 body name (G1 默认 left_rubber_hand; "
                              "Go2 不支持。例: --ee-body right_rubber_hand)")

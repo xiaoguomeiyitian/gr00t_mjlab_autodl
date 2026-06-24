@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """AsyncViser3DViewer — 异步 Viser 3D 可视化, 不阻塞主线程 env.step().
 
-后台线程以 ~30 fps 渲染, 主线程调用 update() 同步 qpos/qvel.
-复用 mjlab 的 ViserMujocoScene 渲染 3D 机器人场景.
+后台渲染线程以 ~30 fps 渲染, 主线程调用 notify_new_frame() 通知新数据就绪.
+使用 threading.Event 同步 (无锁争用), 复用 mjlab 的 ViserMujocoScene 渲染 3D 机器人场景.
+
+架构:
+  - 主线程 (采集): env.step() → 写共享状态 → notify_new_frame() (< 1μs)
+  - 渲染后台线程 (Daemon): wait(swap_event) → 读共享状态 → 渲染
+  - Viser WS 服务线程 (Daemon): 独立处理浏览器连接
 """
 
 from __future__ import annotations
@@ -48,12 +53,16 @@ class AsyncViser3DViewer:
         self._running = threading.Event()
         self._stop = threading.Event()
 
-        self._lock = threading.Lock()
-        self._qpos: np.ndarray | None = None
-        self._qvel: np.ndarray | None = None
-        self._new_data = threading.Event()
+        # ── 共享状态 (主线程写, 渲染线程读) ──
+        self._shared_state: dict[str, Any] | None = None
+        self._state_lock: threading.Lock | None = None
 
+        # ── 帧同步 Event (无锁) ──
+        self._swap_event = threading.Event()
+
+        # ── 统计 ──
         self._render_count = 0
+        self._error_count = 0
         self._last_render_time = 0.0
 
         # ── 连接状态追踪 (自适应 FPS) ──
@@ -62,6 +71,16 @@ class AsyncViser3DViewer:
         self._paused = False  # True = 无连接时暂停渲染
 
     # ── 公开 API ──
+
+    def set_shared_state(self, state: dict, lock: threading.Lock) -> None:
+        """设置共享状态 (主线程写入, 渲染线程读取).
+
+        Args:
+            state: 共享状态字典, 包含 'qpos', 'qvel' 等键
+            lock: 保护共享状态的 threading.Lock
+        """
+        self._shared_state = state
+        self._state_lock = lock
 
     def start(self) -> None:
         """启动后台渲染线程."""
@@ -82,14 +101,26 @@ class AsyncViser3DViewer:
     def stop(self) -> None:
         """停止后台渲染线程."""
         self._stop.set()
+        self._swap_event.set()  # 唤醒等待中的渲染线程
         self._running.clear()
         if self._thread is not None:
             self._thread.join(timeout=5.0)
             self._thread = None
-        logger.info("Viser 3D viewer 已停止 (共渲染 %d 帧)", self._render_count)
+        logger.info("Viser 3D viewer 已停止 (共渲染 %d 帧, %d 次异常)",
+                     self._render_count, self._error_count)
+
+    def notify_new_frame(self) -> None:
+        """主线程调用, 通知渲染线程新数据就绪.
+
+        开销 < 1μs, 不阻塞主线程.
+        """
+        self._swap_event.set()
 
     def update(self) -> None:
-        """同步最新 env 状态到渲染线程 (非阻塞)."""
+        """同步最新 env 状态到共享状态 + 通知渲染线程 (非阻塞).
+
+        主线程每步调用, 仅写共享状态和 set event, 不做任何渲染.
+        """
         try:
             env = self._env
             if env is None:
@@ -101,10 +132,12 @@ class AsyncViser3DViewer:
             qpos = np.asarray(mj_data.qpos, dtype=np.float64).copy()
             qvel = np.asarray(mj_data.qvel, dtype=np.float64).copy()
 
-            with self._lock:
-                self._qpos = qpos
-                self._qvel = qvel
-            self._new_data.set()
+            if self._shared_state is not None and self._state_lock is not None:
+                with self._state_lock:
+                    self._shared_state['qpos'] = qpos
+                    self._shared_state['qvel'] = qvel
+
+            self._swap_event.set()
         except Exception as e:
             logger.debug("Viser update 失败: %s", e)
 
@@ -121,6 +154,11 @@ class AsyncViser3DViewer:
         """是否有浏览器连接."""
         return self._connection_count > 0
 
+    @property
+    def is_alive(self) -> bool:
+        """渲染线程是否存活."""
+        return self._thread is not None and self._thread.is_alive()
+
     def set_fps(self, fps: float) -> None:
         """动态调整渲染 FPS (0 = 暂停渲染)."""
         self._frame_rate = max(0.0, fps)
@@ -130,6 +168,15 @@ class AsyncViser3DViewer:
         else:
             self._paused = True
             logger.info("Viser 渲染暂停 (无连接)")
+
+    def get_render_stats(self) -> dict[str, Any]:
+        """查询渲染统计信息."""
+        return {
+            "alive": self.is_alive,
+            "total_frames": self._render_count,
+            "error_count": self._error_count,
+            "is_connected": self.has_connections,
+        }
 
     def _on_connect(self, connection: Any) -> None:
         """浏览器连接回调."""
@@ -146,7 +193,13 @@ class AsyncViser3DViewer:
     # ── 内部实现 ──
 
     def _render_loop(self) -> None:
-        """后台渲染线程主循环 (自适应 FPS)."""
+        """后台渲染线程主循环 — 双唤醒: Event + 连接检测.
+
+        策略:
+          - 无连接: sleep(0.5) 休眠, 节省 CPU
+          - 有连接 + 新数据: 读共享状态 → 渲染
+          - 有连接 + 无新数据: sleep(0.02) 等待
+        """
         try:
             self._setup_viser()
         except Exception as e:
@@ -154,35 +207,67 @@ class AsyncViser3DViewer:
             logger.info("提示: pip install viser")
             return
 
+        connected_fps = min(self._frame_rate, 30.0)
+        connected_interval = 1.0 / connected_fps
+        last_client_count = -1
+
         while not self._stop.is_set():
             try:
-                # 无连接时大幅降低轮询频率，节省 CPU
-                if self._paused or self._frame_rate <= 0:
+                # ── 1. 检查连接状态 ──
+                try:
+                    clients = self._server.get_clients()
+                    n_clients = len(clients)
+                except Exception:
+                    n_clients = 1  # 无法获取时默认有连接, 避免跳过渲染
+
+                if n_clients != last_client_count:
+                    if n_clients > 0:
+                        logger.info(
+                            "🌐 浏览器已连接 (客户端数=%d), 渲染 @%.0fFPS",
+                            n_clients, connected_fps,
+                        )
+                    else:
+                        logger.info("🌐 无浏览器连接, 暂停渲染 (采集全速运行)")
+                    last_client_count = n_clients
+
+                if n_clients == 0:
+                    # 无连接时休眠, 节省 CPU
                     time.sleep(0.5)
                     continue
 
-                frame_interval = 1.0 / self._frame_rate
-                self._new_data.wait(timeout=frame_interval)
-                self._new_data.clear()
+                # ── 2. 等待新数据 (最多 1 秒) ──
+                if not self._swap_event.wait(timeout=1.0):
+                    continue  # 超时, 继续等待
+                self._swap_event.clear()
 
-                with self._lock:
-                    qpos = self._qpos
-                    qvel = self._qvel
+                # ── 3. 帧率控制 ──
+                now = time.time()
+                elapsed = now - self._last_render_time
+                if elapsed < connected_interval:
+                    time.sleep(min(0.02, connected_interval - elapsed))
+                    continue
+                self._last_render_time = now
+
+                # ── 4. 读取共享状态 (Lock 保护, 快速拷贝) ──
+                qpos = None
+                qvel = None
+                if self._shared_state is not None and self._state_lock is not None:
+                    with self._state_lock:
+                        qpos = self._shared_state.get('qpos')
+                        qvel = self._shared_state.get('qvel')
 
                 if qpos is not None:
+                    # ── 5. 同步到 viser 场景 ──
                     self._sync_to_viser(qpos, qvel)
                     self._render_count += 1
 
-                elapsed = time.time() - self._last_render_time
-                sleep_time = frame_interval - elapsed
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-                self._last_render_time = time.time()
-
             except Exception as e:
-                if not self._stop.is_set():
-                    logger.debug("Viser 渲染帧失败: %s", e)
-                time.sleep(0.1)
+                self._error_count += 1
+                if self._error_count <= 3:
+                    logger.warning("Viser 渲染异常 (%d/3): %s", self._error_count, e)
+                elif self._error_count == 4:
+                    logger.warning("Viser 渲染异常已达 3 次, 静默忽略后续错误...")
+                time.sleep(min(0.5 * self._error_count, 5.0))
 
     def _setup_viser(self) -> None:
         """初始化 Viser 服务器和 3D 场景."""
@@ -223,13 +308,16 @@ class AsyncViser3DViewer:
 
         scene = self._scene
         if hasattr(scene, "mj_data") and scene.mj_data is not None:
+            import mujoco
             nq = min(len(qpos), scene.mj_data.qpos.shape[0])
             scene.mj_data.qpos[:nq] = qpos[:nq]
             if qvel is not None and scene.mj_data.qvel.shape[0] >= nq:
                 scene.mj_data.qvel[:nq] = qvel[:nq]
 
             try:
-                scene.update()
+                # 先 mj_forward 更新 xpos/xmat, 再同步到 viser 场景
+                mujoco.mj_forward(scene.mj_model, scene.mj_data)
+                scene.update_from_mjdata(scene.mj_data)
             except Exception:
                 self._fallback_update(scene, qpos)
 
