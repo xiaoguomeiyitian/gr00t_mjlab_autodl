@@ -40,9 +40,30 @@ if [ -x "$VENV_DIR/bin/python" ] && ! python3 -c "import mjlab" 2>/dev/null; the
     fi
 fi
 
+# ── 运行时环境自动检测 (GPU/CPU) ────────────────────────────────────
+# 参考 unitree_rl_mjlab_viser 项目:
+#   有 NVIDIA GPU:  MUJOCO_GL=egl
+#   无 NVIDIA GPU + 有 libOSMesa:  MUJOCO_GL=osmesa
+#   无 NVIDIA GPU + 无 libOSMesa:  MUJOCO_GL=egl (headless via swrast)
+if [ -z "${MUJOCO_GL:-}" ]; then
+    if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+        export MUJOCO_GL="egl"
+        info "运行时: 检测到 NVIDIA GPU, 启用 EGL 后端"
+    else
+        export CUDA_VISIBLE_DEVICES=""
+        if ldconfig -p 2>/dev/null | grep -q "libOSMesa\.so"; then
+            export MUJOCO_GL="osmesa"
+            info "运行时: 无 GPU, 切换到 CPU+OSMesa 模式"
+        else
+            export MUJOCO_GL="egl"
+            info "运行时: 无 GPU, 降级到 EGL 后端"
+        fi
+    fi
+fi
+
 # ── 参数 ────────────────────────────────────────────────────────────────────
 ROBOT="g1"
-TASK="Unitree-G1-Flat"
+TASK="Mjlab-Velocity-Flat-Unitree-G1"
 NUM_EPISODES=100
 EPISODE_LENGTH=200
 INSTRUCTION="walk forward"
@@ -56,8 +77,9 @@ VIDEO_HEIGHT=224
 VIDEO_WIDTH=224
 VIDEO_FPS=30
 CHECKPOINT=""               # --agent trained 时必填
-ENABLE_VISER=false          # 启用 viser 浏览器 viewer (默认关)
-VISER_PORT=8080
+ENABLE_VISER=true           # 启用 viser 浏览器 viewer (默认开, 有连接时按 VISER_FPS 渲染)
+VISER_PORT=20006
+VISER_FPS=30              # 有浏览器连接时的渲染 FPS (无连接时自动暂停)
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -76,14 +98,15 @@ while [[ $# -gt 0 ]]; do
         --video-width)  VIDEO_WIDTH="$2";    shift 2 ;;
         --video-fps)    VIDEO_FPS="$2";      shift 2 ;;
         --checkpoint)   CHECKPOINT="$2";     shift 2 ;;
-        --viser)        ENABLE_VISER=true;   shift   ;;
+        --no-viser)      ENABLE_VISER=false;  shift   ;;
         --viser-port)   VISER_PORT="$2";     shift 2 ;;
+        --viser-fps)    VISER_FPS="$2";      shift 2 ;;
         -h|--help)
             echo "用法: $0 [选项]"
             echo ""
             echo "基础:"
             echo "  --robot g1|go2          (默认 g1)"
-            echo "  --task TASK_ID          (默认 Unitree-{Robot}-Flat)"
+            echo "  --task TASK_ID          (默认 Mjlab-Velocity-Flat-Unitree-{Robot})"
             echo "  --episodes N            (默认 100)"
             echo "  --length N              每 episode 步数 (默认 200)"
             echo "  --instruction TEXT      语言指令 (默认 'walk forward')"
@@ -105,8 +128,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --video-fps N           默认 30"
             echo ""
             echo "浏览器 3D 可视化 (可选, 需 pip install viser):"
-            echo "  --viser                 启动 Viser 浏览器 3D viewer (实时显示机器人运动 + 进度)"
-            echo "  --viser-port N          端口 (默认 8080)"
+            echo "  --no-viser              禁用 Viser 浏览器 3D viewer (默认启用)"
+            echo "  --viser-port N          端口 (默认 20006)"
+            echo "  --viser-fps N           渲染 FPS (默认 30, 有连接时按此 FPS, 无连接自动暂停)"
             exit 0
             ;;
         *) fail "未知参数: $1" ;;
@@ -114,8 +138,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 # 根据 robot 自动选择默认任务
-if [[ "$ROBOT" == "go2" && "$TASK" == "Unitree-G1-Flat" ]]; then
-    TASK="Unitree-Go2-Flat"
+# 根据 robot 自动选择默认任务 (mjlab 1.2.0 格式: Mjlab-Velocity-{Terrain}-Unitree-{Robot})
+if [[ "$ROBOT" == "go2" && "$TASK" == "Mjlab-Velocity-Flat-Unitree-G1" ]]; then
+    TASK="Mjlab-Velocity-Flat-Unitree-Go2"
 fi
 
 # ── 路径 ────────────────────────────────────────────────────────────────────
@@ -206,7 +231,9 @@ if [ -n "$CHECKPOINT" ]; then
     COLLECT_ARGS+=(--checkpoint "$CHECKPOINT")
 fi
 if [ "$ENABLE_VISER" = true ]; then
-    COLLECT_ARGS+=(--viser --viser-port "$VISER_PORT")
+    COLLECT_ARGS+=(--viser-port "$VISER_PORT" --viser-fps "$VISER_FPS")
+else
+    COLLECT_ARGS+=(--no-viser)
 fi
 
 python3 "$SRC_DIR/collect_data.py" "${COLLECT_ARGS[@]}"

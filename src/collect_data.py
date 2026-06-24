@@ -232,22 +232,23 @@ GAIT_GENERATORS = {
 # ──────────────────────────────────────────────────────────────────────────────
 
 TASK_TO_ROBOT: dict[str, str] = {
-    "Unitree-G1-Flat": "g1",
-    "Unitree-G1-Rough": "g1",
-    "Unitree-G1-23Dof-Flat": "g1",
-    "Unitree-G1-23Dof-Rough": "g1",
-    "Unitree-Go2-Flat": "go2",
-    "Unitree-Go2-Rough": "go2",
-    "Unitree-A2-Flat": "a2",
-    "Unitree-A2-Rough": "a2",
-    "Unitree-R1-Flat": "r1",
-    "Unitree-R1-Rough": "r1",
-    "Unitree-H1_2-Flat": "h1_2",
-    "Unitree-H1_2-Rough": "h1_2",
-    "Unitree-H2-Flat": "h2",
-    "Unitree-H2-Rough": "h2",
-    "Unitree-As2-Flat": "as2",
-    "Unitree-As2-Rough": "as2",
+    # mjlab 1.2.0 任务名称格式: Mjlab-Velocity-{Terrain}-Unitree-{Robot}
+    "Mjlab-Velocity-Flat-Unitree-G1": "g1",
+    "Mjlab-Velocity-Rough-Unitree-G1": "g1",
+    "Mjlab-Velocity-Flat-Unitree-G1-23Dof": "g1",
+    "Mjlab-Velocity-Rough-Unitree-G1-23Dof": "g1",
+    "Mjlab-Velocity-Flat-Unitree-Go2": "go2",
+    "Mjlab-Velocity-Rough-Unitree-Go2": "go2",
+    "Mjlab-Velocity-Flat-Unitree-A2": "a2",
+    "Mjlab-Velocity-Rough-Unitree-A2": "a2",
+    "Mjlab-Velocity-Flat-Unitree-R1": "r1",
+    "Mjlab-Velocity-Rough-Unitree-R1": "r1",
+    "Mjlab-Velocity-Flat-Unitree-H1_2": "h1_2",
+    "Mjlab-Velocity-Rough-Unitree-H1_2": "h1_2",
+    "Mjlab-Velocity-Flat-Unitree-H2": "h2",
+    "Mjlab-Velocity-Rough-Unitree-H2": "h2",
+    "Mjlab-Velocity-Flat-Unitree-As2": "as2",
+    "Mjlab-Velocity-Rough-Unitree-As2": "as2",
 }
 
 
@@ -273,28 +274,36 @@ def _get_viser_viewer():
 
 
 class ViserViewer:
-    """浏览器可视化: 3D 机器人运动 + 进度面板."""
+    """浏览器可视化: 3D 机器人运动 + 进度面板 + 自适应 FPS.
 
-    def __init__(self, env=None, port: int = 8080):
+    自适应策略:
+      - 有浏览器连接: 按 viser_fps 渲染 (默认 30 FPS)
+      - 无浏览器连接: 暂停渲染, 全速采集
+    """
+
+    def __init__(self, env=None, port: int = 20006, viser_fps: float = 30.0):
         self._viewer_3d = None
         self._server = None
         self.port = port
         self.url = f"http://localhost:{port}"
+        self._viser_fps = viser_fps
+        self._fps_adjusted = False  # 是否已根据连接状态调整过 FPS
 
         Viewer3D = _get_viser_viewer()
         if Viewer3D is not None and env is not None:
             try:
-                self._viewer_3d = Viewer3D(env=env, port=port)
+                self._viewer_3d = Viewer3D(env=env, port=port, frame_rate=viser_fps)
                 self._viewer_3d.start()
                 self.url = self._viewer_3d.url
-                logger.info("🌐 Viser 3D viewer 已启动: %s", self.url)
+                logger.info("🌐 Viser 3D viewer 已启动: %s (FPS=%d, 自适应=%s)",
+                            self.url, int(viser_fps), "有连接渲染/无连接暂停")
                 return
             except Exception as e:
                 logger.warning("3D viewer 启动失败, 回退到文本模式: %s", e)
 
         try:
             import viser
-            self._server = viser.ViserServer(host="0.0.0.0", port=port)
+            self._server = viser.ViserServer(host="0.0.0.0", port=port, verbose=False)
             with self._server.gui.add_folder("📊 进度"):
                 self.ep_text = self._server.gui.add_text("Episode", initial_value="-/-", disabled=True)
                 self.step_text = self._server.gui.add_text("Step", initial_value="-/-", disabled=True)
@@ -308,9 +317,20 @@ class ViserViewer:
 
     def update(self, ep: int, total_ep: int, step: int, total_step: int,
                instruction: str, base_vel=None, joint_targets=None) -> None:
+        # 3D viewer: 自适应 FPS (有连接按 viser_fps, 无连接暂停)
         if self._viewer_3d is not None:
+            # 首次 update 时根据连接状态调整 FPS
+            if not self._fps_adjusted:
+                if self._viewer_3d.has_connections:
+                    self._viewer_3d.set_fps(self._viser_fps)
+                    logger.info("🌐 检测到浏览器连接, 渲染 FPS=%d", int(self._viser_fps))
+                else:
+                    self._viewer_3d.set_fps(0)  # 暂停渲染, 全速采集
+                    logger.info("🌐 无浏览器连接, 暂停渲染以全速采集")
+                self._fps_adjusted = True
             self._viewer_3d.update()
 
+        # 文本 viewer (始终更新, 开销极小)
         if self._server is not None:
             try:
                 if hasattr(self, 'ep_text'):
@@ -341,7 +361,7 @@ class ViserViewer:
 
 
 def collect_demonstrations(
-    task_id: str = "Unitree-G1-Flat",
+    task_id: str = "Mjlab-Velocity-Flat-Unitree-G1",
     num_episodes: int = 100,
     episode_length: int = 200,
     instruction: str = "walk forward",
@@ -360,8 +380,9 @@ def collect_demonstrations(
     video_fps: int = 0,
     camera_name: str | None = None,
     instruction_pool: list[str] | None = None,
-    viser: bool = False,
-    viser_port: int = 8080,
+    viser: bool = True,
+    viser_port: int = 20006,
+    viser_fps: float = 30.0,
     ee_body: str | None = None,
 ) -> str:
     """在 unitree_rl_mjlab 仿真环境中收集机器人演示数据。"""
@@ -467,7 +488,7 @@ def collect_demonstrations(
 
         if viser:
             try:
-                viewer = ViserViewer(env=env_raw, port=viser_port)
+                viewer = ViserViewer(env=env_raw, port=viser_port, viser_fps=viser_fps)
             except ImportError:
                 logger.warning("viser 未安装, 跳过浏览器 viewer")
 
@@ -552,6 +573,22 @@ def collect_demonstrations(
         action_mode_ee_body = "left_rubber_hand"
         logger.info("relative_eef 模式默认 EE body: %s", action_mode_ee_body)
 
+    # ─── 视频流式写入器 (避免帧累积导致 OOM) ─────────────────────
+    video_writer = None
+    vid_fps = video_fps if video_fps > 0 else int(round(1.0 / dt))
+    if enable_video and imageio is not None:
+        vid_path = output_path / "episodes.mp4"
+        try:
+            video_writer = imageio.get_writer(
+                str(vid_path), fps=vid_fps,
+                codec="libx264", quality=5,
+                macro_block_size=16,
+            )
+            logger.info("视频将流式写入: %s (%dfps)", vid_path, vid_fps)
+        except Exception as e:
+            logger.warning("imageio.get_writer 失败, 将使用 frames.npz: %s", e)
+            video_writer = None
+
     for ep in range(num_episodes):
         ep_speed = speed * rng.uniform(0.8, 1.2)
         ep_instruction = instruction_pool[ep % len(instruction_pool)]
@@ -577,7 +614,6 @@ def collect_demonstrations(
         observations = []
         actions = []
         rewards = []
-        frames = []  # 视频帧缓冲
 
         for step_idx in range(episode_length):
             # ─── 1) 决定动作 ─────────────────────────────────────
@@ -722,11 +758,15 @@ def collect_demonstrations(
             else:
                 raise ValueError(f"未知 action_mode: {action_mode}")
 
-            # ─── 5) 渲染视频 ───────────────────────────────────────
-            if enable_video:
+            # ─── 5) 渲染视频 (流式写入, 避免 OOM) ──────────────────
+            if enable_video and video_writer is not None:
                 frame = _render_frame(env_raw, ep, step_idx)
                 if frame is not None:
-                    frames.append(frame)
+                    try:
+                        video_writer.append_data(frame)
+                    except Exception as e:
+                        if step_idx == 0:
+                            logger.debug("视频帧写入失败: %s", e)
 
             # ─── 5.5) viser 浏览器 viewer 更新 (可选) ─────────────
             if viewer is not None and (step_idx % 5 == 0 or step_idx == episode_length - 1):
@@ -771,27 +811,18 @@ def collect_demonstrations(
             instruction=ep_instruction,  # 每 episode 的指令 (供 LeRobot 标注)
         )
 
-        # ─── 保存视频 (.mp4 或 frames.npz) ──────────────────────
-        if enable_video and frames:
-            vid_path = output_path / f"episode_{ep:06d}.mp4"
-            if imageio is not None:
-                try:
-                    imageio.mimsave(str(vid_path), frames,
-                                     fps=video_fps if video_fps > 0 else int(round(1.0 / dt)))
-                except Exception as e:
-                    logger.warning("mp4 编码失败, 改存 frames.npz: %s", e)
-                    np.savez_compressed(output_path / f"episode_{ep:06d}_frames.npz",
-                                        frames=np.stack(frames))
-            else:
-                np.savez_compressed(output_path / f"episode_{ep:06d}_frames.npz",
-                                    frames=np.stack(frames))
-
         if (ep + 1) % 10 == 0:
-            extra = f", {len(frames)} frames" if enable_video else ""
-            logger.info("收集进度: %d/%d episodes (ep_instruction='%s'%s)",
-                        ep + 1, num_episodes, ep_instruction[:30], extra)
+            logger.info("收集进度: %d/%d episodes (ep_instruction='%s')",
+                        ep + 1, num_episodes, ep_instruction[:30])
 
-    # ── 6. 关闭环境 ───────────────────────────────────────────────────
+    # ── 6. 关闭视频写入器 & 环境 ────────────────────────────────────
+    if video_writer is not None:
+        try:
+            video_writer.close()
+            logger.info("视频已保存: %s", output_path / "episodes.mp4")
+        except Exception as e:
+            logger.warning("视频写入器关闭失败: %s", e)
+
     if env_raw is not None:
         try:
             env_raw.close()
@@ -1047,22 +1078,22 @@ def main():
   # 2) ⭐ 真实训练数据: 用训练好的 PPO 策略 + 视频
   python collect_data.py --agent trained \\
       --checkpoint ../unitree_rl_mjlab/logs/rsl_rl/g1_velocity/<run>/model_<iter>.pt \\
-      --task Unitree-G1-Flat --num-episodes 100 --video
+      --task Mjlab-Velocity-Flat-Unitree-G1 --num-episodes 100 --video
 
   # 3) 绝对关节目标 (mjlab 直接喂)
   python collect_data.py --agent trained --action-mode absolute --video
 
   # 4) Go2 四足 + 随机策略 + 视频
-  python collect_data.py --task Unitree-Go2-Flat --agent random --video --num-episodes 50
+  python collect_data.py --task Mjlab-Velocity-Flat-Unitree-Go2 --agent random --video --num-episodes 50
 
   # 5) 多样化指令 (locomotion skills)
   python collect_data.py --agent trained --instruction-pool "walk forward,turn left,stop,walk backward"
         """,
     )
     parser.add_argument(
-        "--task", type=str, default="Unitree-G1-Flat",
+        "--task", type=str, default="Mjlab-Velocity-Flat-Unitree-G1",
         choices=list(TASK_TO_ROBOT.keys()),
-        help="unitree_rl_mjlab 任务 ID (default: Unitree-G1-Flat)",
+        help="mjlab 任务 ID (default: Mjlab-Velocity-Flat-Unitree-G1)",
     )
     parser.add_argument("--num-episodes", type=int, default=100,
                         help="收集 episode 数量 (default: 100)")
@@ -1104,11 +1135,13 @@ def main():
                         help="mjlab camera name (None=默认 front_view; "
                              "修复: 此选项目前无 effect, mjlab ViewerConfig 未暴露 "
                              "camera_name 字段, 需在任务 env_cfg 中修改。")
-    parser.add_argument("--viser", action="store_true",
-                        help="启用 viser 浏览器可视化 (显示 episode 进度 / 步数 / "
-                             "指令 / base velocity; 需 pip install viser)")
-    parser.add_argument("--viser-port", type=int, default=8080,
-                        help="viser 服务器端口 (default: 8080)")
+    parser.add_argument("--no-viser", action="store_true",
+                        help="禁用 viser 浏览器可视化 (默认启用, 有连接时按 viser-fps 渲染)")
+    parser.add_argument("--viser-port", type=int, default=20006,
+                        help="viser 服务器端口 (default: 20006)")
+    parser.add_argument("--viser-fps", type=float, default=30.0,
+                        help="viser 渲染 FPS (default: 30, 范围 1-30; "
+                             "有浏览器连接时按此 FPS, 无连接时暂停渲染)")
     parser.add_argument("--ee-body", type=str, default=None,
                         help="relative_eef 模式下的末端 body name (G1 默认 left_rubber_hand; "
                              "Go2 不支持。例: --ee-body right_rubber_hand)")
@@ -1144,8 +1177,9 @@ def main():
         video_width=args.video_width,
         video_fps=args.video_fps,
         camera_name=args.camera_name,
-        viser=args.viser,
+        viser=not args.no_viser,
         viser_port=args.viser_port,
+        viser_fps=args.viser_fps,
         ee_body=args.ee_body,
     )
 

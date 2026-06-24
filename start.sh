@@ -78,6 +78,43 @@ declare -A STEP_DESC=(
 step_name()  { echo "${STEP_NAME[$1]:-未知步骤}"; }
 step_desc()  { echo "${STEP_DESC[$1]:-}"; }
 step_env()   { echo "${STEP_ENV[$1]:-}"; }
+
+# ── 运行时环境自动检测 (GPU/CPU) ────────────────────────────────────
+# 参考 unitree_rl_mjlab_viser 项目:
+#   有 NVIDIA GPU:  MUJOCO_GL=egl
+#   无 NVIDIA GPU + 有 libOSMesa:  CUDA_VISIBLE_DEVICES=""  MUJOCO_GL=osmesa
+#   无 NVIDIA GPU + 无 libOSMesa:  CUDA_VISIBLE_DEVICES=""  MUJOCO_GL=egl (headless via swrast)
+setup_runtime_env() {
+    # 用户已显式设置 → 尊重之
+    if [ -n "${MUJOCO_GL:-}" ]; then
+        info "运行时: 用户已设置 MUJOCO_GL=$MUJOCO_GL, 尊重"
+        return 0
+    fi
+
+    local detected_gpu=false
+    if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+        local gpu_name
+        gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 | tr -d ' ')
+        if [ -n "$gpu_name" ] && [ "$gpu_name" != "Unknown" ]; then
+            detected_gpu=true
+            info "运行时: 检测到 NVIDIA GPU ($gpu_name), 启用 EGL 后端 (MUJOCO_GL=egl)"
+        fi
+    fi
+
+    if [ "$detected_gpu" = true ]; then
+        export MUJOCO_GL="egl"
+    else
+        export CUDA_VISIBLE_DEVICES=""
+        # CPU 模式: 优先 OSMesa (软件光栅化, 无显示)
+        if ldconfig -p 2>/dev/null | grep -q "libOSMesa\.so"; then
+            export MUJOCO_GL="osmesa"
+            info "运行时: 未检测到 NVIDIA GPU, 切换到 CPU+OSMesa 模式 (MUJOCO_GL=osmesa)"
+        else
+            export MUJOCO_GL="egl"
+            info "运行时: 未检测到 NVIDIA GPU, 降级到 EGL 后端 (MUJOCO_GL=egl)"
+        fi
+    fi
+}
 step_script(){ echo "${STEP_SCRIPT[$1]:-}"; }
 
 # ── 路径解析 ─────────────────────────────────────────────────────────────
@@ -107,6 +144,9 @@ run_native_step() {
     info "数据:       $GR00T_REL/data"
     info "模型:       $GR00T_REL/models"
     echo ""
+
+    # ── 运行时环境自动检测 (GPU/CPU) ───────────────────────────────
+    setup_runtime_env
 
     # ── 设置 host 环境变量 ────────────────────────────────────────────
     export GR00T_MJLAB_ROOT="$PROJECT_ROOT"
@@ -314,7 +354,7 @@ run_interactive() {
 # UI 全部输出到 stderr (避免被命令替换捕获)
 # stdout 只返回要传给 run_step 的额外参数 (如 "--episodes 200 --viser")
 prompt_step1_wizard() {
-    local eps viser_flag ep_choice viser_choice
+    local eps ep_choice viser_port_input viser_fps_input
 
     echo "" >&2
     echo "───────────────────────────────────────────────────" >&2
@@ -351,25 +391,33 @@ prompt_step1_wizard() {
             ;;
     esac
 
+    # ── Viser 配置 (默认启用, 只需输入端口号) ──────────────────────
     echo "" >&2
-    read -p "  启用 viser 浏览器查看? (浏览器打开 http://localhost:8080) [y/N, 默认 N]: " viser_choice >&2
-    case "${viser_choice:-N}" in
-        [yY]|[yY][eE][sS])
-            viser_flag="--viser"
-            echo "  ✅ viser 将启动" >&2
-            ;;
-        *)
-            viser_flag=""
-            echo "  ⏭️  跳过 viser" >&2
-            ;;
-    esac
+    read -p "  Viser 端口号 [默认 20006]: " viser_port_input >&2
+    local viser_port="${viser_port_input:-20006}"
+    if [[ "$viser_port" =~ ^[0-9]+$ ]] && [ "$viser_port" -ge 1 ] && [ "$viser_port" -le 65535 ]; then
+        echo "  🌐 端口: $viser_port" >&2
+    else
+        viser_port="20006"
+        echo "  ⚠️  无效端口, 回退到 20006" >&2
+    fi
+
+    read -p "  Viser 渲染 FPS [默认 30]: " viser_fps_input >&2
+    local viser_fps="${viser_fps_input:-30}"
+    if [[ "$viser_fps" =~ ^[0-9]+$ ]] && [ "$viser_fps" -ge 1 ] && [ "$viser_fps" -le 60 ]; then
+        echo "  🎬 FPS: $viser_fps" >&2
+    else
+        viser_fps="30"
+        echo "  ⚠️  无效 FPS, 回退到 30" >&2
+    fi
+    echo "  ℹ️  有浏览器连接时按此 FPS 渲染, 无连接时自动暂停" >&2
 
     echo "" >&2
-    info "准备启动: 1 回合数=$eps  $viser_flag" >&2
+    info "准备启动: 1 回合数=$eps  viser-port=$viser_port viser-fps=$viser_fps" >&2
     echo "" >&2
 
     # 只返回参数到 stdout (命令替换会捕获这里)
-    echo "--episodes $eps $viser_flag"
+    echo "--episodes $eps --viser-port $viser_port --viser-fps $viser_fps"
 }
 
 # ── 入口 ─────────────────────────────────────────────────────────────────

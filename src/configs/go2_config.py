@@ -51,8 +51,8 @@ GO2_DEFAULT_JOINT_ANGLES = {
 }
 
 # ── unitree_rl_mjlab task ID ────────────────────────────────────────────────
-GO2_TASK_ID_FLAT = "Unitree-Go2-Flat"
-GO2_TASK_ID_ROUGH = "Unitree-Go2-Rough"
+GO2_TASK_ID_FLAT = "Mjlab-Velocity-Flat-Unitree-Go2"
+GO2_TASK_ID_ROUGH = "Mjlab-Velocity-Rough-Unitree-Go2"
 
 # 站立高度 (INIT_STATE.pos.z)
 GO2_BASE_HEIGHT = 0.32

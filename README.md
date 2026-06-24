@@ -142,15 +142,15 @@ python3 scripts/list_envs.py
 预期输出（节选）:
 ```
 Available tasks:
-  Unitree-A2-Flat
-  Unitree-G1-23Dof-Flat
-  Unitree-G1-Flat
-  Unitree-G1-Rough
-  Unitree-Go2-Flat
-  Unitree-Go2-Rough
-  Unitree-H1_2-Flat
-  Unitree-R1-Flat
+  Mjlab-Velocity-Flat-Unitree-G1
+  Mjlab-Velocity-Flat-Unitree-Go2
+  Mjlab-Velocity-Rough-Unitree-G1
+  Mjlab-Velocity-Rough-Unitree-Go2
+  ...
 ```
+
+> **注意**: mjlab 1.2.0 的任务名称格式为 `Mjlab-Velocity-{Terrain}-Unitree-{Robot}`，
+> 而非旧版的 `Unitree-{Robot}-{Terrain}`。脚本内部已做映射，用户无需手动转换。
 
 ### 3. 安装本项目依赖
 
@@ -203,16 +203,21 @@ cd gr00t_mjlab_autodl/
 
 ### 关键细节
 
-- **Python 版本**: 直接用系统 Python (3.10 / 3.11 / 3.12), mjlab 1.2.0 要求 `>=3.10, <3.14`
+- **Python 版本**: 推荐 Python 3.12，mjlab 1.2.0 要求 `>=3.10, <3.14`（3.14 不可用）
 - **venv 位置**: `./.venv` (项目内, 已在 `.gitignore`)
 - **不影响 shell rc**: 用 `source .venv/bin/activate` 手动激活, 或直接 `./start.sh ...`
 - **PyTorch wheel**: `torch==2.11.0+cu128`
   - 支持 sm_70 (Volta) / sm_75 (Turing, RTX 2080) / sm_80+ (Ampere+) / sm_90 (Hopper) / sm_100/120 (Blackwell)
-- **GPU 自动检测**: 自动检查 `nvidia-smi` 和 compute_cap, 无 GPU 时仍能装但不可用
+- **GPU 自动检测**: 自动检查 `nvidia-smi` 和 compute_cap
+  - **有 GPU**: 使用 `MUJOCO_GL=egl` 后端（性能最佳）
+  - **无 GPU / CPU 模式**: 使用 `MUJOCO_GL=osmesa` 后端（需要 `libosmesa6`）
+  - 自动检测并设置环境变量，无需手动配置
 - **数据/模型路径**: `data/` `models/` (项目根目录下)
 - **NVIDIA 库路径**: 通过 `LD_LIBRARY_PATH` 动态注入 `.venv/lib/.../nvidia/*/lib`
 - **Isaac-GR00T**: 如果 `../Isaac-GR00T/` 存在, 自动 `editable install` 并注入 `PYTHONPATH`
 - **重装**: `./install_native.sh --recreate all` (删除现有 venv)
+- **mediapy 兼容**: 自动修补 mediapy 1.2.6 的 numpy 2.x 兼容性问题（`_VideoArray` 类）
+- **依赖版本**: mujoco 3.5.x + warp-lang 1.12.x + scipy 1.11+（mjlab 1.2.0 要求）
 
 ---
 

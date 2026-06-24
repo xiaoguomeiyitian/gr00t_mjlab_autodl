@@ -31,7 +31,7 @@ class AsyncViser3DViewer:
     def __init__(
         self,
         env: Any,
-        port: int = 8080,
+        port: int = 20006,
         env_idx: int = 0,
         frame_rate: float = 30.0,
         show_debug: bool = False,
@@ -55,6 +55,11 @@ class AsyncViser3DViewer:
 
         self._render_count = 0
         self._last_render_time = 0.0
+
+        # ── 连接状态追踪 (自适应 FPS) ──
+        self._connection_count = 0
+        self._connection_count_lock = threading.Lock()
+        self._paused = False  # True = 无连接时暂停渲染
 
     # ── 公开 API ──
 
@@ -111,10 +116,37 @@ class AsyncViser3DViewer:
     def render_count(self) -> int:
         return self._render_count
 
+    @property
+    def has_connections(self) -> bool:
+        """是否有浏览器连接."""
+        return self._connection_count > 0
+
+    def set_fps(self, fps: float) -> None:
+        """动态调整渲染 FPS (0 = 暂停渲染)."""
+        self._frame_rate = max(0.0, fps)
+        if fps > 0:
+            self._paused = False
+            logger.info("Viser 渲染 FPS 调整为 %.1f", fps)
+        else:
+            self._paused = True
+            logger.info("Viser 渲染暂停 (无连接)")
+
+    def _on_connect(self, connection: Any) -> None:
+        """浏览器连接回调."""
+        with self._connection_count_lock:
+            self._connection_count += 1
+            logger.info("🌐 Viser 浏览器连接 (共 %d 个)", self._connection_count)
+
+    def _on_disconnect(self, connection: Any) -> None:
+        """浏览器断开回调."""
+        with self._connection_count_lock:
+            self._connection_count = max(0, self._connection_count - 1)
+            logger.info("🌐 Viser 浏览器断开 (剩余 %d 个)", self._connection_count)
+
     # ── 内部实现 ──
 
     def _render_loop(self) -> None:
-        """后台渲染线程主循环."""
+        """后台渲染线程主循环 (自适应 FPS)."""
         try:
             self._setup_viser()
         except Exception as e:
@@ -122,9 +154,14 @@ class AsyncViser3DViewer:
             logger.info("提示: pip install viser")
             return
 
-        frame_interval = 1.0 / self._frame_rate
         while not self._stop.is_set():
             try:
+                # 无连接时大幅降低轮询频率，节省 CPU
+                if self._paused or self._frame_rate <= 0:
+                    time.sleep(0.5)
+                    continue
+
+                frame_interval = 1.0 / self._frame_rate
                 self._new_data.wait(timeout=frame_interval)
                 self._new_data.clear()
 
@@ -159,7 +196,12 @@ class AsyncViser3DViewer:
             host="0.0.0.0",
             port=self._port,
             label="GR00T mjlab",
+            verbose=False,
         )
+
+        # 注册连接/断开回调 (自适应 FPS)
+        self._server.on_client_connect(self._on_connect)
+        self._server.on_client_disconnect(self._on_disconnect)
 
         self._scene = ViserMujocoScene.create(
             server=self._server,

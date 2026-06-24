@@ -143,19 +143,19 @@ class TestTaskToRobotMapping:
 
     def test_g1_tasks(self):
         from collect_data import TASK_TO_ROBOT
-        assert TASK_TO_ROBOT["Unitree-G1-Flat"] == "g1"
-        assert TASK_TO_ROBOT["Unitree-G1-Rough"] == "g1"
+        assert TASK_TO_ROBOT["Mjlab-Velocity-Flat-Unitree-G1"] == "g1"
+        assert TASK_TO_ROBOT["Mjlab-Velocity-Rough-Unitree-G1"] == "g1"
 
     def test_go2_tasks(self):
         from collect_data import TASK_TO_ROBOT
-        assert TASK_TO_ROBOT["Unitree-Go2-Flat"] == "go2"
-        assert TASK_TO_ROBOT["Unitree-Go2-Rough"] == "go2"
+        assert TASK_TO_ROBOT["Mjlab-Velocity-Flat-Unitree-Go2"] == "go2"
+        assert TASK_TO_ROBOT["Mjlab-Velocity-Rough-Unitree-Go2"] == "go2"
 
     def test_23dof_tasks_map_to_g1(self):
         from collect_data import TASK_TO_ROBOT
-        # G1 23Dof 变种仍归类为 g1 (generate 29Dof by default 不对, 需 num_joints=23)
-        assert TASK_TO_ROBOT["Unitree-G1-23Dof-Flat"] == "g1"
-        assert TASK_TO_ROBOT["Unitree-G1-23Dof-Rough"] == "g1"
+        # G1 23Dof 变种仍归类为 g1
+        assert TASK_TO_ROBOT["Mjlab-Velocity-Flat-Unitree-G1-23Dof"] == "g1"
+        assert TASK_TO_ROBOT["Mjlab-Velocity-Rough-Unitree-G1-23Dof"] == "g1"
 
     def test_all_values_are_robot_types(self):
         """值必须在 GAIT_GENERATORS 中注册."""

@@ -310,7 +310,7 @@ def convert(
         logger.warning("未找到 metadata.json, 使用默认值")
         metadata = {
             "robot": robot.upper(),
-            "task_id": "Unitree-G1-Flat" if robot == "g1" else "Unitree-Go2-Flat",
+            "task_id": "Mjlab-Velocity-Flat-Unitree-G1" if robot == "g1" else "Mjlab-Velocity-Flat-Unitree-Go2",
             "instruction": "walk forward",
             "instruction_pool": ["walk forward"],
             "action_mode": "delta",

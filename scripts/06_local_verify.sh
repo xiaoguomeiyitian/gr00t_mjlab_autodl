@@ -35,10 +35,28 @@ if [ -x "$VENV_DIR/bin/python" ] && ! python3 -c "import mjlab" 2>/dev/null; the
     fi
 fi
 
+# ── 运行时环境自动检测 (GPU/CPU) ────────────────────────────────────
+if [ -z "${MUJOCO_GL:-}" ]; then
+    if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+        export MUJOCO_GL="egl"
+        info "运行时: 检测到 NVIDIA GPU, 启用 EGL 后端"
+    else
+        export CUDA_VISIBLE_DEVICES=""
+        if ldconfig -p 2>/dev/null | grep -q "libOSMesa\.so"; then
+            export MUJOCO_GL="osmesa"
+            info "运行时: 无 GPU, 切换到 CPU+OSMesa 模式"
+        else
+            export MUJOCO_GL="egl"
+            info "运行时: 无 GPU, 降级到 EGL 后端"
+        fi
+    fi
+fi
+
 MODEL_PATH=""
 INSTRUCTION="walk forward"
 MAX_STEPS=200
 SHOW_VIEWER=false
+VISER_PORT=20006
 QUANTIZE="auto"
 AUTO_QUANTIZE=false   # 如果 INT4 不存在, 自动从 BF16 量化生成 (本地 8GB 推荐)
 
@@ -196,6 +214,7 @@ INFER_ARGS=(
 )
 if $SHOW_VIEWER; then
     INFER_ARGS+=("--show-viewer")
+    INFER_ARGS+=("--viser-port" "$VISER_PORT")
 fi
 
 python3 "$SRC_DIR/infer.py" "${INFER_ARGS[@]}"

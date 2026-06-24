@@ -56,7 +56,7 @@ class GR00TLocalInference:
         task_id: str | None = None,
         instruction: str = "walk forward",   # ← 修复: P0 bug, 默认值与 run_inference_loop 一致
         viser: bool = False,
-        viser_port: int = 8080,
+        viser_port: int = 20006,
     ):
         self.model_path = model_path
         self.robot = robot
@@ -69,7 +69,7 @@ class GR00TLocalInference:
         #      提升吞吐量, 但因物理扰动会有累积误差
         self.execution_horizon = max(1, min(execution_horizon, action_horizon))
         self.task_id = task_id or (
-            "Unitree-G1-Flat" if robot == "g1" else "Unitree-Go2-Flat"
+            "Mjlab-Velocity-Flat-Unitree-G1" if robot == "g1" else "Mjlab-Velocity-Flat-Unitree-Go2"
         )
         # ← 修复: 实例化时即存 instruction, 避免 _build_policy_observation 永远回退到 "walk forward"
         self.instruction = instruction
@@ -518,9 +518,9 @@ def main():
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--show-viewer", action="store_true")
     parser.add_argument("--viser", action="store_true",
-                        help="启用 Viser 浏览器 3D 可视化 (默认端口 8080)")
-    parser.add_argument("--viser-port", type=int, default=8080,
-                        help="Viser 服务器端口 (默认: 8080)")
+                        help="启用 Viser 浏览器 3D 可视化 (默认端口 20006)")
+    parser.add_argument("--viser-port", type=int, default=20006,
+                        help="Viser 服务器端口 (默认: 20006)")
     parser.add_argument("--execution-horizon", type=int, default=1,
                         help="Action chunking: 每次 GR00T 输出 16 步动作, "
                              "顺序执行前 N 步再重新规划 (1=每步规划; 16=完整 chunking)")

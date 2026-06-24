@@ -143,8 +143,8 @@ G1_DEFAULT_JOINT_ANGLES = {
 }
 
 # ── unitree_rl_mjlab task ID ────────────────────────────────────────────────
-G1_TASK_ID_FLAT = "Unitree-G1-Flat"
-G1_TASK_ID_ROUGH = "Unitree-G1-Rough"
+G1_TASK_ID_FLAT = "Mjlab-Velocity-Flat-Unitree-G1"
+G1_TASK_ID_ROUGH = "Mjlab-Velocity-Rough-Unitree-G1"
 
 # 站立高度 (HOME_KEYFRAME.pos.z)
 G1_BASE_HEIGHT = 0.8

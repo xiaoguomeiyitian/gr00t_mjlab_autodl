@@ -45,7 +45,7 @@ INSTALL_MODE=""          # collect | infer | all
 MIRROR=""                # "" = official, "cn" = 国内 (aliyun)
 NO_APT=false             # 跳过 apt install
 RECREATE_VENV=false      # 强制重建 venv
-PYTHON_VERSION="3.10"    # 优先 python3.10 (Ubuntu 22.04 默认)
+PYTHON_VERSION="3.12"    # 优先 python3.12 (mjlab 1.2.0 要求 >=3.10 <3.14)
 
 VENV_DIR="$PROJECT_ROOT/.venv"
 VENV_BIN="$VENV_DIR/bin"
@@ -256,7 +256,7 @@ install_system_deps() {
         git git-lfs curl wget ca-certificates
         # OpenGL / 图形 (mujoco offscreen rendering 需要)
         libgl1 libglib2.0-0 libsm6 libxext6 libxrender1
-        libegl1-mesa libopengl0
+        libegl1-mesa libopengl0 libosmesa6
         # 网络工具
         net-tools iputils-ping
         # ffmpeg (录制视频)
@@ -458,6 +458,27 @@ install_mjlab() {
     # 1d. mjlab 漏装的依赖 (scipy)
     info "安装 scipy (mjlab.terrains 需要)..."
     "$VENV_BIN/pip" install --no-cache-dir "scipy>=1.11.0"
+
+    # 1e. 安装 mediapy 并修复 numpy 2.x 兼容性问题
+    # mediapy 1.2.6 使用 npt.NDArray (numpy 1.x API), numpy 2.x 已移除该 API
+    info "安装 mediapy + 修复 numpy 2.x 兼容性..."
+    "$VENV_BIN/pip" install --no-cache-dir "mediapy>=1.2.0"
+    # 查找 mediapy __init__.py 路径
+    local mediapy_init
+    mediapy_init=$("$VENV_BIN/python" -c "import mediapy; print(mediapy.__file__)" 2>/dev/null)
+    if [ -n "$mediapy_init" ] && [ -f "$mediapy_init" ]; then
+        # 修复: class _VideoArray(npt.NDArray[Any]) → class _VideoArray(np.ndarray)
+        if grep -q "npt.NDArray" "$mediapy_init" 2>/dev/null; then
+            info "修补 mediapy _VideoArray (numpy 2.x 兼容性)..."
+            sed -i 's/class _VideoArray(npt\.NDArray\[Any\])/class _VideoArray(np.ndarray)/' "$mediapy_init"
+            # 确保 import numpy as np 存在 (通常已有)
+            info "mediapy 修补完成: $mediapy_init"
+        else
+            info "mediapy 无需修补 (已兼容 numpy 2.x)"
+        fi
+    else
+        warn "未找到 mediapy __init__.py, 跳过修补"
+    fi
 
     # 验证
     info "验证 mjlab..."
