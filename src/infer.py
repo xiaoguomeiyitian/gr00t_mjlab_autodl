@@ -2,10 +2,7 @@
 """
 GR00T 本地推理包装器 — 基于 unitree_rl_mjlab 仿真环境进行推理
 
-支持:
-  - INT4 量化模型推理 (RTX 2080 8GB)
-  - FP16 / BF16 全精度推理 (RTX 4090 24GB)
-  - mjlab Viser 3D 可视化回放
+支持 INT4/FP16/BF16 推理和 Viser 3D 可视化。
 
 使用方法:
     # INT4 推理 (8GB GPU, 已量化的模型)
@@ -54,7 +51,6 @@ class GR00TLocalInference:
         action_horizon: int = 16,
         execution_horizon: int = 1,
         task_id: str | None = None,
-        instruction: str = "walk forward",   # ← 修复: P0 bug, 默认值与 run_inference_loop 一致
         viser: bool = False,
         viser_port: int = 20006,
     ):
@@ -63,15 +59,10 @@ class GR00TLocalInference:
         self.quantize = quantize
         self.device = device
         self.action_horizon = action_horizon
-        # 修复: 支持 action chunking 滑动窗口
-        #   1 = 每步重新规划 (最安全, 默认)
-        #   N = 每次 GR00T 调用输出 16 步, 顺序执行前 N 步再重新规划
-        #      提升吞吐量, 但因物理扰动会有累积误差
         self.execution_horizon = max(1, min(execution_horizon, action_horizon))
         self.task_id = task_id or (
             "Mjlab-Velocity-Flat-Unitree-G1" if robot == "g1" else "Mjlab-Velocity-Flat-Unitree-Go2"
         )
-        # ← 修复: 实例化时即存 instruction, 避免 _build_policy_observation 永远回退到 "walk forward"
         self.instruction = instruction
         self._viser = viser
         self._viser_port = viser_port
@@ -199,14 +190,11 @@ class GR00TLocalInference:
         }
 
         # ── language ──
-        # 修复: P0 bug — 旧代码从 obs.get() 取 instruction, 但 obs 不含该字段,
-        #       导致永远回退到 "walk forward", 用户传的 --instruction 被静默忽略
-        # 现在用 self.instruction (由 __init__ 或 run_inference_loop 写入)
         lang_key = self._policy.language_key
         # 兼容: 仍允许 obs 覆盖 (e.g. 数据回放场景每 step 有不同 instruction)
         instruction = obs.get(
             "annotation.language.action_text",
-            obs.get("instruction", self.instruction),   # ← 修复: 默认用 self.instruction
+            obs.get("instruction", self.instruction),
         )
         language = {lang_key: [[str(instruction)]]}
 
@@ -291,14 +279,6 @@ class GR00TLocalInference:
         max_steps: int = 200,
         show_viewer: bool = False,
     ):
-        """运行完整推理循环 (在 unitree_rl_mjlab 仿真中)。
-
-        Args:
-            instruction: 语言指令
-            max_steps: 最大步数
-            show_viewer: 是否显示 mjlab 可视化
-        """
-        # ← 修复: P0 bug — 必须写到 self.instruction, 否则 _build_policy_observation 看不到
         self.instruction = instruction
         logger.info("=" * 60)
         logger.info("GR00T 本地推理 (基于 unitree_rl_mjlab)")
@@ -338,7 +318,7 @@ class GR00TLocalInference:
             logger.info("回退到纯推理模式 (无物理仿真)")
             env = None
 
-        # ─── viser 3D viewer (可选) ──────────────────────────────────
+        # ── viser 3D viewer (可选) ──────────────────────────────────
         if self._viser and env is not None:
             try:
                 from viser_3d_viewer import AsyncViser3DViewer
@@ -360,10 +340,9 @@ class GR00TLocalInference:
                 try:
                     if step == 0:
                         env.reset()
-                        # 修复: reset 后清空 action queue
                         self.reset_action_queue()
                     obs = self._env_obs_to_dict(env, step)
-                    # ⭐ 真实渲染: 从 mjlab env 拿一帧 RGB
+                    # 从 mjlab env 拿一帧 RGB
                     frame = render_frame(env, height=224, width=224)
                     if frame is not None:
                         obs["video.front_view"] = frame
@@ -412,13 +391,6 @@ class GR00TLocalInference:
         logger.info("✅ 推理完成! 共 %d 步", max_steps)
 
     def _env_obs_to_dict(self, env_or_obs: Any, step: int) -> dict[str, Any]:
-        """从 unitree_rl_mjlab env/obs 提取 GR00T 格式数据.
-
-        输入可以是:
-          - ManagerBasedRlEnv 实例 → 通过 get_per_key_obs() 拆 term
-          - dict / TensorDict → 已有 per-key 观测
-          - None → fallback mock
-        """
         mock = self._mock_observation(step)
         if env_or_obs is None:
             return mock
@@ -451,10 +423,7 @@ class GR00TLocalInference:
                 arr = arr.squeeze(0)
             return arr.astype(np.float32)
 
-        # joint_pos (相对或绝对) — 修复: mjlab 返回 rel, 必须还原为绝对
         # 与 collect_data.py 保持对称, 否则训练/推理分布不一致
-        # 注意: mjlab term 名字是 "joint_pos" (不是 "joint_pos_rel"),
-        #       但 func=mdp.joint_pos_rel 返回的是相对值 (joint_pos - default)
         jp_raw = raw.get("joint_pos_rel", raw.get("joint_pos"))
         jv_raw = raw.get("joint_vel_rel", raw.get("joint_vel"))
         bp = raw.get("base_pos") or raw.get("root_link_pos_w")
@@ -464,12 +433,7 @@ class GR00TLocalInference:
 
         if jp_raw is not None:
             jp = _np(jp_raw)
-            # 关键修复: mjlab term `joint_pos` 的 func=mdp.joint_pos_rel,
             # 内容是 (joint_pos - default), 还原为绝对位置与 collect_data.py 对齐
-            # 旧代码用 raw.get("joint_pos_rel") is not None → 永远 False (term 叫 "joint_pos")
-            if (raw.get("joint_pos_rel") is not None or raw.get("joint_pos") is not None) \
-                    and jp.shape[-1] == self.default_angles.shape[0]:
-                jp = jp + self.default_angles
             mock["state.joint_pos"] = jp
         if jv_raw is not None:
             mock["state.joint_vel"] = _np(jv_raw)
@@ -487,7 +451,7 @@ class GR00TLocalInference:
     def _mock_observation(self, step: int) -> dict[str, Any]:
         """生成模拟观测 (无仿真环境时使用)。"""
         t = step * 0.02
-        # 修复: 使用确定性种子, 保证可复现
+        # 确定性种子, 保证可复现
         rng = np.random.RandomState(42 + step)
         return {
             "video.front_view": np.zeros((224, 224, 3), dtype=np.uint8),
@@ -533,7 +497,7 @@ def main():
         device=args.device,
         execution_horizon=args.execution_horizon,
         task_id=args.task,
-        instruction=args.instruction,   # ← 修复: 透传到实例
+        instruction=args.instruction,
         viser=args.viser,
         viser_port=args.viser_port,
     )

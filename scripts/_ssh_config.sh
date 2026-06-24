@@ -1,22 +1,6 @@
 #!/usr/bin/env bash
-# ============================================================================
-# ⚠️  SSH 连接参数 — 请填写你的 AutoDL 云端信息
-# ============================================================================
-#
-# 使用方法 (二选一):
-#
-#   方法 1: 直接编辑下面变量 (推荐, 最简单)
-#           改完保存即可, 其他脚本会自动读取
-#
-#   方法 2: 设为环境变量 (CI/CD 友好)
-#           export AUTODL_SSH_HOST="root@xxx.com"
-#           export AUTODL_SSH_PORT="12345"
-#
-#   方法 3: 命令行传参 (临时覆盖)
-#           ./02_upload_to_autodl.sh --host root@xxx.com --port 12345
-#
+# SSH 连接参数 — 填写你的 AutoDL 云端信息
 # 优先顺序: 命令行参数 > 环境变量 > 本文件默认值
-# ============================================================================
 
 # ── 必填 ───────────────────────────────────────────────────────────────────
 SSH_HOST=""           # ← AutoDL SSH 地址, 例: "root@region-9.xxxx.autodl.com"
@@ -39,16 +23,11 @@ SCP_BANDWIDTH_LIMIT=""              # 限速, 例: "100M" (留空不限)
 SSH_OPTS="-o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=6"
                                     # 保活参数 (每 30s 心跳, 6 次失败重连)
 
-# ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║  示例 (按实际情况修改):                                                     ║
-# ║                                                                            ║
-# ║  SSH_HOST="root@region-9.autodl.com"                                       ║
-# ║  SSH_PORT="32451"                                                           ║
-# ║  SSH_USER="root"                                                            ║
-# ║  SSH_KEY="$HOME/.ssh/id_rsa_autodl"                                         ║
-# ║  SSH_PASS=""                                                                ║
-# ║  REMOTE_DIR="/root/workspace"                                               ║
-# ╚═══════════════════════════════════════════════════════════════════════════╝
+# 示例:
+#   SSH_HOST="root@region-9.autodl.com"
+#   SSH_PORT="32451"
+#   SSH_KEY="$HOME/.ssh/id_rsa_autodl"
+#   REMOTE_DIR="/root/workspace"
 
 # ── 环境变量覆盖 (CI 场景) ─────────────────────────────────────────────────
 SSH_HOST="${AUTODL_SSH_HOST:-$SSH_HOST}"

@@ -10,11 +10,6 @@
 #   [5] 本地量化   → 本机 shell, 执行 05_local_quantize.sh
 #   [6] 推理验证   → 本机 .venv, 执行 06_local_verify.sh
 #
-# 运行模式: 全部在主机执行 (本机 venv)
-#   - 步骤 1/6 使用项目下的 .venv (含 mjlab / Isaac-GR00T)
-#   - 步骤 2/4/5 是纯 shell / SCP / Python, 不需要 venv
-#   - 步骤 3 提示 SSH 到云端
-#   前置: ./install_native.sh 已成功运行
 #
 # 用法:
 #   ./start.sh                       # 交互式选择步骤
@@ -22,8 +17,6 @@
 #   ./start.sh 1 --robot g1          # 步骤 1 透传额外参数
 #   ./start.sh 6 --auto-quantize     # 步骤 6 推理 (自动量化)
 #   ./start.sh shell                 # 进入本机 venv shell (激活环境, 调试用)
-#   ./start.sh collect               # 旧名: 等价于 步骤 1
-#   ./start.sh infer                 # 旧名: 等价于 步骤 6
 # ============================================================================
 set -euo pipefail
 
@@ -40,8 +33,7 @@ warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 step()  { echo -e "${BLUE}[→]${NC} $1"; }
 fail()  { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
-# ── 步骤定义 (单一事实来源) ─────────────────────────────────────────────
-# 字段: 编号 | 名称 | 运行环境 (native/host/manual) | 调用的脚本
+# ── 步骤定义 ─────────────────────────────────────────────────────────────
 declare -A STEP_ENV=(
     [1]="native"  # 本机 .venv (含 mjlab)
     [2]="host"    # 本机 shell (scp)

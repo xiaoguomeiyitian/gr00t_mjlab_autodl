@@ -144,7 +144,7 @@ class TestActionVectorErrorHandling:
 
 
 class TestActionModeKeyConsistency:
-    """P2 修复: action_mode 语义必须与 modality.json action key 一致.
+    """action_mode 语义必须与 modality.json action key 一致.
 
     这是 convert_to_lerobot.py 实际写入 modality.json 后做的 self-check,
     这里直接验证 expected_action_keys 字典.

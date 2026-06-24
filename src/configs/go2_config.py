@@ -1,10 +1,6 @@
 """Go2 四足机器人配置 — 12 关节。
 
-关节名称和默认姿态来源于 unitree_rl_mjlab 官方:
-  src/assets/robots/unitree_go2/go2_constants.py (INIT_STATE)
-  src/tasks/velocity/config/go2/env_cfgs.py
-
-GR00T 模态配置用于数据收集和 fine-tune 管线。
+关节名称和默认姿态来源于 unitree_rl_mjlab 官方。
 """
 
 from __future__ import annotations
@@ -30,23 +26,19 @@ GO2_ACTION_DIM = GO2_NUM_JOINTS  # = 12
 GO2_ACTION_MODES = ("absolute", "delta")
 GO2_DEFAULT_ACTION_MODE = "delta"
 
-# ── 默认站立姿态 (INIT_STATE from unitree_rl_mjlab) ────────────────────────
-# source: src/assets/robots/unitree_go2/go2_constants.py
-# 注意: go2_constants.py 用 `.*_thigh_joint` 正则匹配四条腿, 所以四条腿
-# thigh 都是 0.9, calf 都是 -1.8。hip 用 `.*R_hip_joint` / `.*L_hip_joint` 区
-# 分左右, FL/RL 标 -0.1, FR/RR 标 0.1。
+# 默认站立姿态 (INIT_STATE from unitree_rl_mjlab)
 GO2_DEFAULT_JOINT_ANGLES = {
-    "FL_hip_joint": -0.1,    # ← 修复: 之前是 0.0 (与 mjlab 官方不符)
+    "FL_hip_joint": -0.1,
     "FL_thigh_joint": 0.9,
     "FL_calf_joint": -1.8,
     "FR_hip_joint": 0.1,
     "FR_thigh_joint": 0.9,
     "FR_calf_joint": -1.8,
     "RL_hip_joint": -0.1,
-    "RL_thigh_joint": 0.9,   # ← 修复: 之前是 1.0
+    "RL_thigh_joint": 0.9,
     "RL_calf_joint": -1.8,
-    "RR_hip_joint": 0.1,     # ← 修复: 之前是 0.0
-    "RR_thigh_joint": 0.9,   # ← 修复: 之前是 1.0
+    "RR_hip_joint": 0.1,
+    "RR_thigh_joint": 0.9,
     "RR_calf_joint": -1.8,
 }
 
@@ -72,12 +64,9 @@ GO2_VIDEO_KEY = "video.front_view"
 GO2_DEFAULT_CAMERA_NAME = "front_view"
 
 
-# ── LeRobot v2 modality.json (GR00T 兼容) ─────────────────────────────
-#
-# 与 G1 同一 schema: state/action 用 start/end 切片, video 用 original_key。
-# 拼接顺序一致: joint_pos(12) | joint_vel(12) | base_pos(3) | base_quat(4)
+# LeRobot v2 modality.json (GR00T 兼容)
+# 状态拼接顺序: joint_pos(12) | joint_vel(12) | base_pos(3) | base_quat(4)
 #              | base_lin_vel(3) | base_ang_vel(3) = 总 37 维
-# 动作: joint_position_delta(12) 或 joint_position_target(12)
 
 
 def get_go2_modality_config(action_mode: str = "delta", include_video: bool = True) -> dict[str, Any]:

@@ -28,9 +28,7 @@ warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
 step()  { echo -e "${BLUE}[→]${NC} $1"; }
 fail()  { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 
-# ── 自动检测 venv (native 模式) ────────────────────────────────────────────
-#   逻辑: 如果系统 python3 找不到 mjlab, 但 .venv 里有, 就把 .venv 加到 PATH 前
-#   幂等: 任何情况下 (系统有 mjlab 或 venv 有 mjlab) 都能正确处理
+# ── 自动检测 venv ────────────────────────────────────────────
 VENV_DIR="$PROJECT_ROOT/.venv"
 if [ -x "$VENV_DIR/bin/python" ] && ! python3 -c "import mjlab" 2>/dev/null; then
     if "$VENV_DIR/bin/python" -c "import mjlab" 2>/dev/null; then
@@ -69,17 +67,14 @@ EPISODE_LENGTH=200
 INSTRUCTION="walk forward"
 SPEED=0.5
 SEED=42
-AGENT_TYPE="scripted"       # scripted | random | zero | trained
-ACTION_MODE="delta"         # ← 修复: 默认改为 delta (与 README 推荐对齐, GR00T 官方最佳实践)
-                            #   absolute|delta|relative_eef (relative_eef 仅 G1)
-ENABLE_VIDEO=true           # 采集 RGB 视频 (GR00T 必需)
-VIDEO_HEIGHT=224
+AGENT_TYPE="scripted"   ACTION_MODE="delta"         
+                        ENABLE_VIDEO=true       VIDEO_HEIGHT=224
 VIDEO_WIDTH=224
 VIDEO_FPS=30
 CHECKPOINT=""               # --agent trained 时必填
-ENABLE_VISER=true           # 启用 viser 浏览器 viewer (默认开, 有连接时按 VISER_FPS 渲染)
+ENABLE_VISER=true # 启用 viser 浏览器 viewer (默认开, 有连接时按 VISER_FPS 渲染)
 VISER_PORT=20006
-VISER_FPS=30              # 有浏览器连接时的渲染 FPS (无连接时自动暂停)
+VISER_FPS=30 # 有浏览器连接时的渲染 FPS (无连接时自动暂停)
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -118,7 +113,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --checkpoint PATH       trained agent PPO checkpoint (.pt)"
             echo ""
             echo "动作空间 (GR00T fine-tune 用):"
-            echo "  --action-mode MODE      absolute|delta|relative_eef (默认 delta ⭐ GR00T 推荐)"
+            echo "  --action-mode MODE      absolute|delta|relative_eef (默认 delta)"
             echo "  注: relative_eef 仅 G1 (需 6D EEF), delta 推荐用于 locomotion"
             echo ""
             echo "视频:"
@@ -195,7 +190,6 @@ for d in "$PROJECT_ROOT/data" "$PROJECT_ROOT/models"; do
             CUR_USER=$(whoami)
             warn "目录不可写: $d (owner=$OWNER, 当前用户=$CUR_USER)"
             warn "通常是因为早期以 root 身份执行了某个进程留下的目录"
-            warn "修复: sudo chown -R $CUR_USER:$CUR_USER $d"
             fail "权限不足, 请运行上面的 chown 命令后重试"
         fi
         rm -f "$d/.write_test"

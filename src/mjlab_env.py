@@ -1,10 +1,4 @@
-"""mjlab_env.py — unitree_rl_mjlab 共享工具.
-
-提供 collect_data.py 与 infer.py 共用的:
-  - get_per_key_obs(env): 从 mjlab ManagerBasedRlEnv 拿 per-key obs
-  - render_frame(env, ...): 从 mjlab env 渲染一帧 RGB 图像
-  - load_ppo_policy(env, task_id, checkpoint, device): 加载 PPO 推理策略
-"""
+"""unitree_rl_mjlab 共享工具: get_per_key_obs / render_frame / load_ppo_policy."""
 
 from __future__ import annotations
 
@@ -18,27 +12,14 @@ logger = logging.getLogger(__name__)
 
 
 def get_per_key_obs(env_raw: Any) -> dict[str, Any]:
-    """从 unitree_rl_mjlab ManagerBasedRlEnv 取 per-key 观测 (dict[str, tensor]).
-
-    mjlab env.step() 返回的 obs 是按 actor/critic 拼接的 tensor,
-    这里通过 Entity.data 拿分组前的 dict (因为 mjlab ObservationManager
-    默认 concatenate_terms=True, 没有直接 per-key 访问接口).
-
-    修复: 删除对 om.terms / om._terms 的尝试 (mjlab ObservationManager
-         无此属性, 这些行是死代码; 直接走 Entity.data 兜底即可).
-    """
     out: dict[str, Any] = {}
-    # 直接从 robot Entity.data 拿 base / joint 状态 (mjlab 唯一稳定的接口)
     try:
         robot = env_raw.unwrapped.scene["robot"]
         rd = robot.data
-        # base pose/velocity (mjlab root_link_* 字段, shape (num_envs, D))
         out["base_pos"] = rd.root_link_pos_w
         out["base_quat"] = rd.root_link_quat_w
         out["base_lin_vel"] = rd.root_link_lin_vel_w
         out["base_ang_vel"] = rd.root_link_ang_vel_w
-        # joint (mjlab Entity.data.joint_pos 是绝对位置, 但 mjlab term `joint_pos`
-        #        func=mdp.joint_pos_rel 返回的是 rel; 我们直接用 Entity.data 绝对)
         out["joint_pos"] = rd.joint_pos
         out["joint_vel"] = rd.joint_vel
     except Exception as e:
@@ -48,16 +29,8 @@ def get_per_key_obs(env_raw: Any) -> dict[str, Any]:
 
 
 def render_frame(env_raw: Any, height: int = 224, width: int = 224) -> np.ndarray | None:
-    """从 mjlab env 渲染一帧 RGB 图像 (H, W, 3) uint8.
-
-    多种 API 兼容性尝试:
-      1) env.render()                — gym-style
-      2) env.unwrapped.sim._data     — 直接走 mujoco native offscreen
-      3) viser / native viewer (需 DISPLAY)
-    """
     if env_raw is None:
         return None
-    # 方案 1: gym-style render
     try:
         frame = env_raw.render()
         if frame is not None:
@@ -80,7 +53,6 @@ def render_frame(env_raw: Any, height: int = 224, width: int = 224) -> np.ndarra
             return arr
     except Exception:
         pass
-    # 方案 2: mjlab sim.mj_data + mujoco.Renderer (兜底)
     try:
         sim = env_raw.unwrapped.sim
         mj_model = sim.mj_model
@@ -100,11 +72,6 @@ def render_frame(env_raw: Any, height: int = 224, width: int = 224) -> np.ndarra
 
 def load_ppo_policy(env_raw: Any, task_id: str, checkpoint_path: str,
                     device: str = "cuda:0"):
-    """加载 unitree_rl_mjlab 训练好的 PPO 策略, 返回 inference callable.
-
-    Returns:
-        policy_fn: (obs_tensor) → action_tensor
-    """
     rl_mjlab_root = Path(__file__).resolve().parent.parent / "unitree_rl_mjlab"
     if rl_mjlab_root.exists() and str(rl_mjlab_root) not in __import__("sys").path:
         __import__("sys").path.insert(0, str(rl_mjlab_root))
@@ -116,9 +83,6 @@ def load_ppo_policy(env_raw: Any, task_id: str, checkpoint_path: str,
     env_wrapped = RslRlVecEnvWrapper(env_raw, clip_actions=agent_cfg.clip_actions)
 
     runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
-    # 修复: MjlabOnPolicyRunner.__init__(env, train_cfg: dict, log_dir=None, device='cpu')
-    #   train_cfg 必须是 dict, 而 RslRlBaseRunnerCfg 是 frozen dataclass — 必须 asdict 转换
-    #   旧代码直接传 dataclass 对象 → OnPolicyRunner 内部 .items() 会失败
     try:
         from dataclasses import asdict
         train_cfg_dict = asdict(agent_cfg)

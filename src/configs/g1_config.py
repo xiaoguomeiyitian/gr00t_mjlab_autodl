@@ -1,10 +1,6 @@
 """G1 人形机器人配置 — 29 关节。
 
-关节名称和默认姿态来源于 unitree_rl_mjlab 官方:
-  src/assets/robots/unitree_g1/g1_constants.py (HOME_KEYFRAME)
-  src/tasks/velocity/config/g1/env_cfgs.py
-
-GR00T 模态配置用于数据收集和 fine-tune 管线。
+关节名称和默认姿态来源于 unitree_rl_mjlab 官方。
 """
 
 from __future__ import annotations
@@ -159,26 +155,15 @@ G1_EMBODIMENT_ID = 29
 # ── 渲染 / 视频参数 ──────────────────────────────────────────────────────
 G1_VIDEO_HEIGHT = 224
 G1_VIDEO_WIDTH = 224
-G1_VIDEO_FPS = 50  # mjlab 默认 50Hz, 与 G1_DT 匹配
+G1_VIDEO_FPS = 50
 G1_VIDEO_KEY = "video.front_view"
-# mjlab 默认 camera name (位于 pelvis / torso 上方)
+
 G1_DEFAULT_CAMERA_NAME = "front_view"
 
 
-# ── LeRobot v2 modality.json (GR00T 兼容) ─────────────────────────────
-#
-# Isaac-GR00T 期望的 modality.json schema:
-#   - state / action 块: 每个子键是 { "start": <int>, "end": <int> }
-#       start/end 是切片索引, 作用在拼接后的 observation.state / action 列上
-#   - video 块: 每个子键是 { "original_key": "observation.images.<name>" }
-#   - annotation 块: 每个子键是 { "original_key": "task_index" }
-# 参考: Isaac-GR00T/demo_data/cube_to_bowl_5/meta/modality.json
-#       gr00t/data/dataset/lerobot_episode_loader.py:296-322
-#
+# LeRobot v2 modality.json (GR00T 兼容)
 # 状态拼接顺序: joint_pos(29) | joint_vel(29) | base_pos(3) | base_quat(4)
 #              | base_lin_vel(3) | base_ang_vel(3) = 总 71 维
-# 动作拼接顺序 (delta 模式): joint_position_delta(29) = 29 维
-# 动作拼接顺序 (absolute 模式): joint_position_target(29) = 29 维
 
 
 def _build_state_layout(num_joints: int) -> tuple[list[tuple[str, int]], int]:

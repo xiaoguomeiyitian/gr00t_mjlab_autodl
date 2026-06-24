@@ -55,8 +55,7 @@ g1_absolute_config = {
                 rep=ActionRepresentation.ABSOLUTE,
                 type=ActionType.NON_EEF,
                 format=ActionFormat.DEFAULT,
-                state_key="joint_pos",   # ← 修复: ABSOLUTE 模式下 generate_rel_stats 会跳过,
-                                       #    但保持显式声明便于未来切到 RELATIVE, 不留坑
+                state_key="joint_pos",
             ),
         ],
     ),

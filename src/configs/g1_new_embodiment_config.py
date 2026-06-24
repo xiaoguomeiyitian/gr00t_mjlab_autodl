@@ -79,8 +79,7 @@ g1_delta_config = {
                 rep=ActionRepresentation.RELATIVE,
                 type=ActionType.NON_EEF,
                 format=ActionFormat.DEFAULT,
-                state_key="joint_pos",   # ← 修复: P0 bug, 不加会导致 relative_stats 生成崩溃
-                                       #    reference_state = 当前 joint_pos, delta = target - current
+                state_key="joint_pos",
             ),
         ],
     ),

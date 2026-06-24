@@ -1,59 +1,8 @@
 #!/usr/bin/env python3
 """数据格式转换 — npz → LeRobot v2 (Isaac-GR00T 兼容)
 
-读取 collect_data.py 产出的:
-  - episode_*.npz         (state + action + reward + 每 episode instruction)
-  - episode_*.mp4         (RGB 视频, 可选)
-  - episode_*_frames.npz  (frames 序列, 当 imageio 不可用时的 fallback)
-
-转换为 GR00T fine-tune 所需的 LeRobot v2 标准格式 (与 Isaac-GR00T
-demo_data/cube_to_bowl_5 完全一致):
-
-  output_dir/
-  ├── meta/
-  │   ├── info.json              # LeRobot v2 dataset metadata
-  │   ├── modality.json          # GR00T start/end slice schema
-  │   ├── episodes.jsonl         # 每 episode: index, tasks, length
-  │   ├── tasks.jsonl            # task_index → task string
-  │   └── stats.json             # 由 gr00t/data/stats.py 生成 (本脚本不写)
-  ├── data/
-  │   └── chunk-000/
-  │       └── file-000.parquet   # 所有 step 的数据 (state/action 拼接为单列)
-  └── videos/
-      └── chunk-000/
-          └── observation.images.front_view/
-              └── episode_NNNNNN.mp4
-
-parquet 列结构 (关键):
-  - observation.state : float32[71]  (G1) / float32[37]  (Go2)   ← 拼接
-  - action            : float32[29]  (G1) / float32[12]  (Go2)   ← 拼接
-  - task_index        : int64[1]     (索引 tasks.jsonl)
-  - frame_index       : int64[1]
-  - episode_index     : int64[1]
-  - index             : int64[1]     (全局 step 序号)
-  - timestamp         : float32[1]
-  - observation.images.front_view : str  (相对路径, GR00T 内部抽帧)
-
-注意: state/action 都是**拼接的单列**, 通过 modality.json 的 start/end 切片
-被 GR00T 数据加载器分解为各子字段。
-
-使用方法:
-    # 默认 (从 metadata.json 读 action_mode)
-    python convert_to_lerobot.py --robot g1 \\
-        --data-dir data/g1_raw \\
-        --output-dir data/g1_lerobot
-
-    # 显式指定 action_mode
-    python convert_to_lerobot.py --robot g1 \\
-        --action-mode delta \\
-        --data-dir data/g1_raw \\
-        --output-dir data/g1_lerobot
-
-转换完成后, 必须在云端或本地跑一次 stats 生成:
-    python gr00t/data/stats.py \\
-        --dataset-path data/g1_lerobot \\
-        --embodiment-tag NEW_EMBODIMENT \\
-        --modality-config-path <path-to>/g1_new_embodiment_config.py
+将 collect_data.py 产出的 npz/mp4 转换为 LeRobot v2 标准格式 (与 Isaac-GR00T
+demo_data/cube_to_bowl_5 完全一致)。
 """
 
 from __future__ import annotations
@@ -77,19 +26,13 @@ logger = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 常量: 与 GR00T demo data 一致
-# ──────────────────────────────────────────────────────────────────────────────
-
-# LeRobot data path 模板 (与 demo_data/cube_to_bowl_5/info.json 一致)
-# 关键: loader 用 episode_index 读取 parquet, 不能用 file_index
+# 常量 (与 GR00T demo data 一致)
 DATA_PATH_TEMPLATE = "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet"
-# GR00T 期望的视频路径: {video_key} 会被 modality.json video.<key>.original_key 替换
 VIDEO_PATH_TEMPLATE = "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
 CHUNKS_SIZE = 1000
 LEROBOT_CODEBASE_VERSION = "v2.1"
 
 
-# state 拼接顺序: 与 configs/g1_config.py _build_state_layout 一致
 STATE_KEYS_ORDER = [
     "joint_pos",
     "joint_vel",
@@ -323,7 +266,7 @@ def convert(
         }
 
     # 确定 action_mode / robot 元数据
-    action_mode = action_mode or metadata.get("action_mode", "delta")  # ← 修复: 默认 delta (与 01 脚本对齐)
+    action_mode = action_mode or metadata.get("action_mode", "delta")
     if action_mode not in ("absolute", "delta", "relative_eef"):
         logger.warning("未知 action_mode '%s', 回退 delta", action_mode)
         action_mode = "delta"
@@ -333,7 +276,6 @@ def convert(
     video_fps = int(metadata.get("video_fps", 30))
     video_height = int(metadata.get("video_height", 224))
     video_width = int(metadata.get("video_width", 224))
-    # 与 g1_config.G1_VIDEO_KEY 保持一致
     video_subdir = "observation.images.front_view"
 
     # 维度计算
@@ -355,7 +297,6 @@ def convert(
     logger.info("  视频:          %s", "✅" if has_video else "❌")
     logger.info("=" * 60)
 
-    # ── 1. 写入 modality.json (GR00T start/end schema) ─────────────────
     if robot == "g1":
         from configs.g1_config import get_g1_modality_config
         modality = get_g1_modality_config(
@@ -373,8 +314,6 @@ def convert(
         json.dump(modality, f, indent=2, ensure_ascii=False)
     logger.info("✅ 写入 meta/modality.json")
 
-    # ── 1.5 一致性校验: modality.action 关键 key 必须与 action_mode 语义匹配 ──
-    # 防止采集端用 --action-mode delta, 但误用 absolute config (或反之)
     expected_action_keys = {
         "absolute":     ["joint_position_target"],
         "delta":        ["joint_position_delta"],
@@ -383,7 +322,6 @@ def convert(
     actual_action_keys = list(modality.get("action", {}).keys())
     expected = expected_action_keys.get(action_mode, [])
     if expected and not any(k in actual_action_keys for k in expected):
-        # ← 修复: 这是软警告, 不阻断流程, 但训练会失败. 给用户明确提示
         logger.warning(
             "⚠️  modality.action 关键 key 与 action_mode 不一致! "
             "action_mode=%s 期望含 %s, 实际含 %s. "
@@ -391,14 +329,12 @@ def convert(
             action_mode, expected, actual_action_keys,
         )
 
-    # ── 2. 找出所有 episode npz ─────────────────────────────────────────
     episodes = sorted(data_path.glob("episode_*.npz"))
     if not episodes:
         logger.error("未找到 episode_*.npz 文件: %s", data_path)
         sys.exit(1)
     logger.info("找到 %d 个 episodes", len(episodes))
 
-    # ── 3. 处理视频 ────────────────────────────────────────────────────
     videos_chunk_dir = output_path / "videos" / "chunk-000"
     video_relpaths: dict[int, str | None] = {}
     if has_video:
@@ -429,7 +365,6 @@ def convert(
             with open(meta_dir / "modality.json", "w") as f:
                 json.dump(modality, f, indent=2, ensure_ascii=False)
 
-    # ── 4. 转换每 episode 到 parquet rows ─────────────────────────────
     data_records: list[dict[str, Any]] = []
     episode_metadata: list[dict[str, Any]] = []
     task_to_index: dict[str, int] = {}
@@ -476,10 +411,6 @@ def convert(
             logger.warning("Episode %d 缺 observations/actions, 跳过", ep_idx)
             continue
 
-        # 修复: n_steps 优先级应为 observations > actions > rewards
-        #   - observations 是关键 (决定 parquet 写入多少 frame)
-        #   - actions 是次优 (理论上应与 observations 同长)
-        #   - rewards 仅辅助 (旧代码用 rewards 优先, 错)
         if isinstance(observations, list):
             n_steps = len(observations)
         elif isinstance(actions, list):
@@ -511,8 +442,6 @@ def convert(
             action_vec = _get_action_vector(act, action_mode, num_joints)
 
             record: dict[str, Any] = {
-                "observation.state": state_vec,                   # float32[state_dim]
-                "action":            action_vec,                  # float32[action_dim]
                 "task_index":    task_to_index[ep_instruction],
                 "frame_index":   step_idx,
                 "episode_index": ep_idx,
@@ -539,7 +468,6 @@ def convert(
         logger.error("没有可写入的数据, 请检查 npz 文件")
         sys.exit(1)
 
-    # ── 5. 写 Parquet ─────────────────────────────────────────────────
     df = pd.DataFrame(data_records)
     # 把 numpy 数组列显式转 list (parquet 兼容)
     for col in ("observation.state", "action"):
@@ -553,10 +481,6 @@ def convert(
     if video_subdir in df.columns:
         df[video_subdir] = df[video_subdir].astype("object")
 
-    # ── 每个 episode 一个 parquet, 匹配官方 LeRobot v2 格式 ────────────────
-    # GR00T 的 lerobot_episode_loader 通过 data_path 模板按 episode_index 读取:
-    #   parquet_filename = data_path_pattern.format(episode_chunk=..., episode_index=...)
-    # 因此 data/chunk-XXX/episode_NNNNNN.parquet 是必须的命名格式。
     n_episodes_written = 0
     for ep_idx in range(len(episodes)):
         ep_df = df[df["episode_index"] == ep_idx].copy()
@@ -571,14 +495,12 @@ def convert(
     logger.info("✅ 写入 %d 个 episode parquet (chunk-000/episode_NNNNNN.parquet)",
                 n_episodes_written)
 
-    # ── 6. 写 episodes.jsonl (LeRobot v2: tasks=list, length=int) ────
     episodes_path = meta_dir / "episodes.jsonl"
     with open(episodes_path, "w") as f:
         for ep in episode_metadata:
             f.write(json.dumps(ep, ensure_ascii=False) + "\n")
     logger.info("✅ 写入 meta/episodes.jsonl (%d episodes)", len(episode_metadata))
 
-    # ── 7. 写 tasks.jsonl ─────────────────────────────────────────────
     tasks_path = meta_dir / "tasks.jsonl"
     with open(tasks_path, "w") as f:
         for t in tasks_list:
@@ -587,7 +509,6 @@ def convert(
     for t in tasks_list:
         logger.info("  [%d] %s", t["task_index"], t["task"][:60])
 
-    # ── 8. 写 info.json (LeRobot v2 + GR00T) ──────────────────────────
     # state/action 都是拼接单列; 维度从 modality.json 推算
     features: dict[str, Any] = {
         "observation.state": {"dtype": "float32", "shape": [state_dim]},
@@ -617,7 +538,6 @@ def convert(
 
     fps_value = video_fps if has_video else int(round(1.0 / metadata.get("dt", 0.02)))
 
-    # 修复: total_chunks 应根据实际 chunk 数计算 (CHUNKS_SIZE=1000, 大数据集可能多 chunk)
     total_chunks = max(
         1, math.ceil(len(episode_metadata) / CHUNKS_SIZE)
     )

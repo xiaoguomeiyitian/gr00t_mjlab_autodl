@@ -1,11 +1,10 @@
 #!/usr/bin/env python3.12
-"""测试 infer.py 中:
-   - GR00TLocalInference 初始化参数 (P0 修复: instruction 透传)
-   - 设备自动检测 (cuda/cpu)
-   - 量化模式自动检测 (从路径识别 int4/int8/全精度)
-   - _build_policy_observation (mock obs)
+"""测试 infer.py:
+   - 初始化参数 (instruction 透传)
+   - 设备/量化模式自动检测
+   - _build_policy_observation
    - Action chunking 队列管理
-   - RELATIVE 模式 delta 累加逻辑
+   - RELATIVE 模式 delta 累加
 """
 import sys, os, pytest, numpy as np
 from pathlib import Path
@@ -46,7 +45,7 @@ def infer_instance(mock_torch, tmp_path):
 
 
 class TestInstructionPropagation:
-    """P0 bug 修复: --instruction 必须传到 self.instruction, 避免永远用默认值."""
+    """instruction 参数必须正确透传到实例。"""
 
     def test_default_instruction_stored(self, infer_instance):
         assert infer_instance.instruction == "walk forward"
@@ -147,7 +146,7 @@ class TestPolicyObservationBuild:
             assert v.dtype == np.float32
 
     def test_language_uses_self_instruction(self, infer_instance):
-        """P0 修复: 默认用 self.instruction, 不再永远 fallback 到 walk forward."""
+        """默认使用 self.instruction。"""
         infer_instance.instruction = "step back carefully"
         obs = self._make_mock_obs()
         infer_instance._policy = MagicMock()

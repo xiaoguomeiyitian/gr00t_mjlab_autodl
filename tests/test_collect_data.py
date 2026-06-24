@@ -88,7 +88,7 @@ class TestGo2GaitGenerator:
     def test_default_stance_in_mjlab_range(self):
         """Go2 站立姿态在 mjlab 物理合理范围 (hip ±0.2, thigh 0.7-1.0, calf -2.0 ~ -1.5).
 
-        修复: 之前 default = [0.0, 0.9, -1.8, 0.1, 0.9, -1.8, -0.1, 1.0, -1.8, 0.0, 1.0, -1.8]
+        与 mjlab 官方 go2_constants.py 一致
         与 go2_config.GO2_DEFAULT_JOINT_ANGLES 不一致 (FL_hip 应 -0.1 而非 0.0, RL/RR_thigh 应 0.9 而非 1.0)
         修复后 gait_generator_go2 直接从 config 读默认姿态.
         """
