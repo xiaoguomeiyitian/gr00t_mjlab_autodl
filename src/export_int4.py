@@ -54,6 +54,14 @@ def export_int4(
         logger.error("需要安装: pip install bitsandbytes accelerate transformers")
         sys.exit(1)
 
+    # 注册 Isaac-GR00T 自定义模型架构 (Gr00tN1d7)
+    try:
+        from gr00t.model.gr00t_n1d7.gr00t_n1d7 import Gr00tN1d7  # noqa: F401
+        logger.info("已注册 Isaac-GR00T 模型架构 (Gr00tN1d7)")
+    except ImportError as e:
+        logger.warning(f"无法导入 Gr00tN1d7 注册模块: {e}")
+        logger.warning("请确保 Isaac-GR00T 在 PYTHONPATH 中")
+
     model_path_obj = Path(model_dir)
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)

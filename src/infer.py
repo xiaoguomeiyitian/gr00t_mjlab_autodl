@@ -51,8 +51,10 @@ class GR00TLocalInference:
         action_horizon: int = 16,
         execution_horizon: int = 1,
         task_id: str | None = None,
+        instruction: str = "walk forward",
         viser: bool = False,
         viser_port: int = 20006,
+        embodiment_tag: str | None = None,
     ):
         self.model_path = model_path
         self.robot = robot
@@ -75,21 +77,17 @@ class GR00TLocalInference:
         # 加载配置
         if robot == "g1":
             from configs.g1_config import (
-                G1_NUM_JOINTS, G1_EMBODIMENT_TAG,
-                G1_DEFAULT_JOINT_ANGLES, G1_JOINT_NAMES,
+                G1_NUM_JOINTS, G1_DEFAULT_JOINT_ANGLES, G1_JOINT_NAMES,
             )
             self.num_joints = G1_NUM_JOINTS
-            self.embodiment_tag = G1_EMBODIMENT_TAG
             self.default_angles = np.array(
                 [G1_DEFAULT_JOINT_ANGLES[n] for n in G1_JOINT_NAMES], dtype=np.float32
             )
         else:
             from configs.go2_config import (
-                GO2_NUM_JOINTS, GO2_EMBODIMENT_TAG,
-                GO2_DEFAULT_JOINT_ANGLES, GO2_JOINT_NAMES,
+                GO2_NUM_JOINTS, GO2_DEFAULT_JOINT_ANGLES, GO2_JOINT_NAMES,
             )
             self.num_joints = GO2_NUM_JOINTS
-            self.embodiment_tag = GO2_EMBODIMENT_TAG
             self.default_angles = np.array(
                 [GO2_DEFAULT_JOINT_ANGLES[n] for n in GO2_JOINT_NAMES], dtype=np.float32
             )
@@ -115,7 +113,73 @@ class GR00TLocalInference:
             except ImportError:
                 self.device = "cpu"
 
+        # 自动检测 embodiment tag (从模型 processor_config.json 读取)
+        self.embodiment_tag = embodiment_tag or self._detect_embodiment_tag()
+
         self._policy = None
+
+    def _detect_embodiment_tag(self) -> str:
+        """从模型 processor_config.json 自动检测 embodiment tag.
+
+        优先匹配模型名中的关键词 (如 g1_sonic → unitree_g1_sonic),
+        否则返回第一个可用的 tag。
+        """
+        import json as _json
+        from pathlib import Path as _Path
+
+        proc_cfg_path = _Path(self.model_path) / "processor_config.json"
+        if not proc_cfg_path.exists():
+            logger.warning("processor_config.json 不存在, 使用 NEW_EMBODIMENT")
+            return "new_embodiment"
+
+        proc_cfg = _json.loads(proc_cfg_path.read_text())
+        modality_configs = proc_cfg.get("processor_kwargs", {}).get("modality_configs", {})
+        available_tags = list(modality_configs.keys())
+
+        if not available_tags:
+            logger.warning("processor_config.json 中无 modality_configs, 使用 NEW_EMBODIMENT")
+            return "new_embodiment"
+
+        # 根据模型名关键词匹配
+        # 模型路径可能是 "models/g1_gr00t" 或 "models/GR00T-N1.7-G1-SONIC-LAFAN"
+        model_name_lower = _Path(self.model_path).name.lower()
+        # 也检查父路径 (如 "GR00T-N1.7-G1-SONIC-LAFAN" 在 models/ 下)
+        parent_name = _Path(self.model_path).parent.name.lower() if _Path(self.model_path).parent else ""
+        combined_name = model_name_lower + " " + parent_name
+
+        # 第一轮: 精确匹配 (优先级最高)
+        for tag in available_tags:
+            tag_lower = tag.lower()
+            if "g1_sonic" in combined_name and "g1_sonic" in tag_lower:
+                logger.info(f"自动匹配 embodiment tag: {tag}")
+                return tag
+
+        # 第二轮: 宽泛匹配 (按优先级排序)
+        # 优先匹配 unitree_ 前缀的 tag (通常是最新/最好的模型)
+        for tag in available_tags:
+            tag_lower = tag.lower()
+            if "unitree" in tag_lower and "g1" in combined_name and "g1" in tag_lower:
+                logger.info(f"自动匹配 embodiment tag: {tag}")
+                return tag
+            if "unitree" in tag_lower and "sonic" in combined_name and "sonic" in tag_lower:
+                logger.info(f"自动匹配 embodiment tag: {tag}")
+                return tag
+
+        # 第三轮: 一般匹配
+        for tag in available_tags:
+            tag_lower = tag.lower()
+            if "g1" in combined_name and "g1" in tag_lower:
+                logger.info(f"自动匹配 embodiment tag: {tag}")
+                return tag
+            if "sonic" in combined_name and "sonic" in tag_lower:
+                logger.info(f"自动匹配 embodiment tag: {tag}")
+                return tag
+
+        # 回退: 返回第一个 tag
+        selected = available_tags[0]
+        logger.warning(f"无法精确匹配 embodiment tag, 使用第一个: {selected}")
+        logger.warning(f"可用 tags: {available_tags}")
+        return selected
 
     def load(self):
         """加载 GR00T 模型 (Isaac-GR00T N1.7 Gr00tPolicy)."""
@@ -123,11 +187,11 @@ class GR00TLocalInference:
         logger.info("  机器人: %s (%d joints)", self.robot, self.num_joints)
         logger.info("  量化: %s", self.quantize)
         logger.info("  设备: %s", self.device)
+        logger.info("  embodiment_tag: %s", self.embodiment_tag)
 
         try:
             # 官方 Isaac-GR00T (N1.7) 策略实现
             from gr00t.policy.gr00t_policy import Gr00tPolicy
-            from gr00t.data.embodiment_tags import EmbodimentTag
         except ImportError as e:
             logger.error("无法导入 Isaac-GR00T: %s", e)
             logger.info("请确保已安装 Isaac-GR00T 并将 gr00t/ 加入 PYTHONPATH:")
@@ -137,8 +201,9 @@ class GR00TLocalInference:
         # 注意: GR00T 模型保存时已经包含量化信息 (INT4/BF16/FP16),
         # 不需要在加载时再次指定 dtype 或 quantize。
         # Gr00tPolicy 签名: (embodiment_tag, model_path, *, device, strict)
+        # embodiment_tag 使用从 processor_config.json 自动检测的 tag
         self._policy = Gr00tPolicy(
-            embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,
+            embodiment_tag=self.embodiment_tag,
             model_path=str(self.model_path),
             device=str(self.device),
             strict=True,
@@ -156,38 +221,98 @@ class GR00TLocalInference:
     def _build_policy_observation(self, obs: dict[str, Any]) -> dict[str, Any]:
         """把 *单步* 仿真观测转换为 Gr00tPolicy 期望的 batched 形式.
 
+        所有 key 名称均来自加载模型时 self._policy.modality_configs，
+        确保与 processor_config.json 中定义的 modality_keys 完全一致。
+
         Returns:
             dict, 三个顶级 key:
               video:   {view_name: np.ndarray (B=1, T=1, H, W, 3) uint8}
               state:   {state_name: np.ndarray (B=1, T=1, D) float32}
               language:{lang_name: list[list[str]]  shape (B=1, T=1)}
         """
+        assert self._policy is not None, "Policy 未加载, 请先调用 load()"
+        modality_configs = self._policy.modality_configs
+
         # ── video ──
-        frame = obs.get("video.front_view")
+        # 使用模型定义的第一个 video key (如 \"ego_view\")
+        video_keys = modality_configs["video"].modality_keys
+        video_key = video_keys[0]
+        frame = obs.get(f"video.{video_key}", obs.get("video.front_view"))
         if frame is None:
-            frame = np.zeros((224, 224, 3), dtype=np.uint8)
+            frame = np.zeros((256, 256, 3), dtype=np.uint8)
         if frame.ndim == 3:
             frame = frame[None, None, ...]  # (H,W,3) -> (1,1,H,W,3)
         elif frame.ndim == 4:
             frame = frame[None, ...]        # (T,H,W,3) -> (1,T,H,W,3)
         elif frame.ndim == 5 and frame.shape[0] != 1:
             frame = frame[:1]
-        video = {"front_view": frame.astype(np.uint8)}
+        video = {video_key: frame.astype(np.uint8)}
 
         # ── state ──
         # Gr00tPolicy 要求 state[key] 形状 (B, T, D), 这里 B=T=1
+        # 使用模型定义的 state modality_keys
         def _to_btd(x):
             arr = np.asarray(x, dtype=np.float32)
             return arr.reshape(1, 1, -1)
 
-        state = {
-            "joint_pos": _to_btd(obs["state.joint_pos"]),
-            "joint_vel": _to_btd(obs["state.joint_vel"]),
-            "base_pos":  _to_btd(obs["state.base_pos"]),
-            "base_quat": _to_btd(obs["state.base_quat"]),
-            "base_lin_vel": _to_btd(obs["state.base_lin_vel"]),
-            "base_ang_vel": _to_btd(obs["state.base_ang_vel"]),
+        # 从 obs 中提取完整的 joint_pos (如果可用)
+        # unitree_g1_sonic 需要将完整 joint_pos 分解为 body parts
+        full_joint_pos = obs.get("state.joint_pos")  # 已包含 default_angles (绝对位置)
+        full_joint_vel = obs.get("state.joint_vel")
+
+        # body part 到 G1_JOINT_NAMES 中索引范围的映射
+        _part_ranges = {
+            "left_leg":  (0, 6),
+            "right_leg": (6, 12),
+            "waist":     (12, 15),
+            "left_arm":  (15, 22),
+            "right_arm": (22, 29),
         }
+
+        state = {}
+        for model_state_key in modality_configs["state"].modality_keys:
+            val = None
+
+            # 1. 如果是 body part 类型 key, 从 full_joint_pos 中切片
+            if model_state_key in _part_ranges and full_joint_pos is not None:
+                start, end = _part_ranges[model_state_key]
+                jp = np.asarray(full_joint_pos, dtype=np.float32)
+                if jp.ndim == 0:
+                    jp = jp.reshape(1)
+                val = jp[start:end]
+            # 2. 如果是 joint_vel body part, 从 full_joint_vel 中切片
+            elif model_state_key in _part_ranges and full_joint_vel is not None:
+                start, end = _part_ranges[model_state_key]
+                jv = np.asarray(full_joint_vel, dtype=np.float32)
+                if jv.ndim == 0:
+                    jv = jv.reshape(1)
+                val = jv[start:end]
+            # 3. projected_gravity
+            elif model_state_key == "projected_gravity":
+                pg = obs.get("state.projected_gravity")
+                if pg is not None:
+                    val = np.asarray(pg, dtype=np.float32).flatten()
+                else:
+                    val = np.array([0.0, 0.0, -1.0], dtype=np.float32)
+            # 4. hand keys: 从 obs 中尝试获取
+            elif "hand" in model_state_key:
+                # 尝试从 obs 获取手部数据
+                hand_key = f"state.{model_state_key}"
+                val = obs.get(hand_key)
+                if val is None:
+                    val = np.zeros(6, dtype=np.float32)
+                else:
+                    val = np.asarray(val, dtype=np.float32).flatten()
+
+            # 5. fallback: 用 default_angles 填充
+            if val is None:
+                if model_state_key in _part_ranges:
+                    start, end = _part_ranges[model_state_key]
+                    val = self.default_angles[start:end].copy()
+                else:
+                    val = np.zeros(1, dtype=np.float32)
+
+            state[model_state_key] = _to_btd(val)
 
         # ── language ──
         lang_key = self._policy.language_key
@@ -200,14 +325,45 @@ class GR00TLocalInference:
 
         return {"video": video, "state": state, "language": language}
 
+    def _get_default_subset(self, model_state_key: str) -> np.ndarray:
+        """从 default_angles 中提取对应 body part 的关节值.
+
+        unitree_g1_sonic 的 state keys: left_leg(6), right_leg(6),
+        waist(3), left_arm(7), right_arm(7), left_hand(?), right_hand(?),
+        projected_gravity(3).
+
+        G1 29 关节顺序 (来自 g1_config.py G1_JOINT_NAMES):
+          左腿 6, 右腿 6, 腰部 3, 左臂 7, 右臂 7 (共 29)
+        """
+        # G1 29 关节顺序与 default_angles 的对应关系
+        _part_ranges = {
+            "left_leg":  (0, 6),
+            "right_leg": (6, 12),
+            "waist":     (12, 15),
+            "left_arm":  (15, 22),
+            "right_arm": (22, 29),
+        }
+        if model_state_key in _part_ranges:
+            start, end = _part_ranges[model_state_key]
+            return self.default_angles[start:end].copy()
+        # hand / projected_gravity: 返回零值
+        if "hand" in model_state_key:
+            return np.zeros(6, dtype=np.float32)  # 手部自由度估计
+        if "projected_gravity" in model_state_key:
+            return np.array([0.0, 0.0, -1.0], dtype=np.float32)
+        return np.zeros(1, dtype=np.float32)
+
     def get_action(self, obs: dict[str, Any]) -> np.ndarray:
         """从观测生成动作 (单步关节目标).
 
         支持 action chunking: 当 execution_horizon > 1 时, 内部维护一个队列,
-        每次调用 GR00T 输出 16 步, 顺序执行前 execution_horizon 步。
+        每次调用 GR00T 输出多步, 顺序执行前 execution_horizon 步。
         - RELATIVE 模式: 累积 delta 应用到当前 joint_pos
         - ABSOLUTE 模式: 直接作为目标
         - DELTA 模式: 同 ABSOLUTE (视为目标)
+
+        对于多 action key 模型 (如 unitree_g1_sonic 的 motion_token + hand_joints),
+        将所有 action key 的结果合并为一个 (num_joints,) 的关节目标。
 
         Args:
             obs: 单步观测字典, 同上 _build_policy_observation 输入格式
@@ -228,13 +384,12 @@ class GR00TLocalInference:
         policy_obs = self._build_policy_observation(obs)
         action_dict, _info = self._policy._get_action(policy_obs)  # dict[(B, T, D)]
 
-        first_key = self._action_keys[0]
-        # shape: (B=1, T=action_horizon, D) → (action_horizon, D)
-        action_seq = action_dict[first_key][0]  # (T, D)
+        # 合并所有 action key 的结果
+        joint_seq = self._merge_action_keys(action_dict)
 
         # 缓存到队列 (最多 execution_horizon 步)
-        n_cache = min(self.execution_horizon, action_seq.shape[0])
-        self._action_queue = [action_seq[t].astype(np.float32) for t in range(n_cache)]
+        n_cache = min(self.execution_horizon, joint_seq.shape[0])
+        self._action_queue = [joint_seq[t].astype(np.float32) for t in range(n_cache)]
 
         # RELATIVE 模式: 记录累加起点 (执行第一步时的 joint_pos)
         self._action_queue_start_pos = np.asarray(
@@ -244,29 +399,181 @@ class GR00TLocalInference:
         # 返回第一步
         return self._pop_cached_action(obs, ActionRepresentation)
 
+    def _merge_action_keys(self, action_dict: dict[str, Any]) -> np.ndarray:
+        """将多个 action key 的输出合并为一个 (T, num_joints) 数组.
+
+        不同模型的 action key 组合不同:
+        - real_g1_relative_eef_relative_joints: 9 个 key (eef + hand + arm + waist + ...)
+        - unitree_g1_sonic: 3 个 key (motion_token + left_hand_joints + right_hand_joints)
+
+        Args:
+            action_dict: {key: (B, T, D)} 来自 Gr00tPolicy._get_action
+
+        Returns:
+            (T, num_joints) 合并后的关节动作序列
+        """
+        # 单 action key 情况: 直接使用
+        if len(self._action_keys) == 1:
+            first_key = self._action_keys[0]
+            return action_dict[first_key][0]  # (T, D)
+
+        # 多 action key 情况
+        action_configs = self._policy.modality_configs["action"].action_configs
+        rep = self._action_rep
+
+        # 初始化输出 (T, num_joints), 用当前 default_angles 作为基准
+        T = action_dict[self._action_keys[0]].shape[1]
+        output = np.tile(self.default_angles, (T, 1))  # (T, 29)
+
+        # 策略: 遍历 action_configs (有序), 按 state_key 映射到关节
+        # action_configs 的顺序与 modality_keys 中的 action 部分对应
+        for ac in action_configs:
+            if ac is None:
+                continue
+
+            # 找到这个 action config 对应的 action_dict key
+            # action_configs 的顺序对应 action modality_keys 中有 state_key 的部分
+            action_key = ac.state_key
+            if action_key is None:
+                # state_key 为 null 的 key 是独立的 action output (如 motion_token)
+                # 需要找到对应的 action_dict key
+                continue
+
+            # 在 action_dict 中查找对应的数据
+            if action_key in action_dict:
+                action_data = action_dict[action_key][0]  # (T, D)
+                self._apply_action_to_joints(output, action_data, ac)
+
+        # 处理 state_key 为 null 的 action key (如 motion_token)
+        # 这些 key 的 action 数据不包含在 action_configs 中
+        # 按优先级: 优先使用维度最高的 key (通常包含全身动作)
+        null_state_keys = []
+        for ak in self._action_keys:
+            if ak not in action_dict:
+                continue
+            # 检查这个 key 是否已经被 action_configs 处理过
+            handled = False
+            for ac in action_configs:
+                if ac is not None and ac.state_key == ak:
+                    handled = True
+                    break
+            if not handled:
+                null_state_keys.append(ak)
+
+        # 按维度降序排列, 优先使用维度最高的 key
+        null_state_keys.sort(key=lambda k: action_dict[k].shape[1], reverse=True)
+
+        for ak in null_state_keys:
+            action_data = action_dict[ak][0]  # (T, D)
+            D = action_data.shape[1]
+            if D >= self.num_joints:
+                # 这个 key 包含全部关节, 直接使用
+                output[:, :self.num_joints] = action_data[:, :self.num_joints]
+                break  # 已覆盖全部关节, 不需要其他 key
+            else:
+                # 维度不够, 按顺序填充未覆盖的关节
+                # 找到第一个未被 default_angles 覆盖的位置
+                output[:, :D] = action_data
+
+        return output
+
+    def _apply_action_to_joints(
+        self, output: np.ndarray, action_data: np.ndarray, ac: Any
+    ) -> None:
+        """将单个 action key 的数据映射到输出关节数组中.
+
+        Args:
+            output: (T, num_joints) 输出数组, 原地修改
+            action_data: (T, D) 单个 action key 的数据
+            ac: ActionConfig (含 rep, state_key 等)
+        """
+        from gr00t.data.types import ActionRepresentation
+
+        sk = ac.state_key
+        D = action_data.shape[1]
+
+        # 根据 state_key 名称映射到 G1_JOINT_NAMES 的索引
+        _joint_name_map = {}
+        for i, name in enumerate(self._get_g1_joint_names()):
+            _joint_name_map[name] = i
+
+        # 解析 state_key 对应的关节范围
+        _part_joint_names = {
+            "left_leg": [
+                "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint",
+                "left_knee_joint", "left_ankle_pitch_joint", "left_ankle_roll_joint",
+            ],
+            "right_leg": [
+                "right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint",
+                "right_knee_joint", "right_ankle_pitch_joint", "right_ankle_roll_joint",
+            ],
+            "waist": ["waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint"],
+            "left_arm": [
+                "left_shoulder_pitch_joint", "left_shoulder_roll_joint",
+                "left_shoulder_yaw_joint", "left_elbow_joint",
+                "left_wrist_roll_joint", "left_wrist_pitch_joint", "left_wrist_yaw_joint",
+            ],
+            "right_arm": [
+                "right_shoulder_pitch_joint", "right_shoulder_roll_joint",
+                "right_shoulder_yaw_joint", "right_elbow_joint",
+                "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint",
+            ],
+            "left_hand": [f"left_hand_joint_{i}" for i in range(D)],
+            "right_hand": [f"right_hand_joint_{i}" for i in range(D)],
+        }
+
+        joint_names = _part_joint_names.get(sk)
+        if joint_names is None:
+            return
+
+        indices = []
+        for jn in joint_names:
+            if jn in _joint_name_map:
+                indices.append(_joint_name_map[jn])
+
+        n_apply = min(len(indices), D)
+        if ac.rep == ActionRepresentation.RELATIVE:
+            # RELATIVE: action_data 是 delta, 需要加到当前位置
+            # 使用 default_angles 作为基准
+            for i in range(n_apply):
+                output[:, indices[i]] = output[:, indices[i]] * 0 + action_data[:, i]
+                # 注意: 这里简化为直接使用 action_data 作为目标
+                # 实际 RELATIVE 应该是 current_pos + delta, 但 current_pos 在 _pop_cached_action 中处理
+        else:
+            # ABSOLUTE: 直接作为目标
+            for i in range(n_apply):
+                output[:, indices[i]] = action_data[:, i]
+
+    def _get_g1_joint_names(self) -> list[str]:
+        """获取 G1 关节名称列表."""
+        try:
+            from configs.g1_config import G1_JOINT_NAMES
+            return G1_JOINT_NAMES
+        except ImportError:
+            # fallback: 生成通用名称
+            return [f"joint_{i}" for i in range(self.num_joints)]
+
     def _pop_cached_action(
         self, obs: dict[str, Any], ActionRepresentation: type
     ) -> np.ndarray:
-        """从队列中取出一步并按 ActionRepresentation 转换为关节目标."""
+        """从队列中取出一步并按 ActionRepresentation 转换为关节目标.
+
+        对于多 action key 模型, _action_queue 中缓存的是已合并的 (num_joints,) 数组。
+        """
         if not self._action_queue:
             raise RuntimeError("action queue empty — call get_action() first")
 
         # 取步索引 (累积 offset)
         idx = self.execution_horizon - len(self._action_queue)
-        delta = self._action_queue.pop(0)  # (D,)
+        action_step = self._action_queue.pop(0)  # (num_joints,)
 
         rep = self._action_rep
         if rep == ActionRepresentation.RELATIVE:
-            # RELATIVE: 把"从起点累加 idx 步"的绝对目标算出来
-            # 即当前 obs 的 joint_pos + (已消费步的 delta 之和) + 剩余步的 delta 之和
-            #
-            # 注意: 我们缓存的是单步 delta (不是绝对轨迹), 所以需要实时累加。
-            # 简化策略: RELATIVE 模式下, execution_horizon 退化为 1
-            # (因为每步的物理状态会影响"当前 joint_pos"的定义)
+            # RELATIVE: action_step 是 delta, 加到当前 joint_pos
             current_pos = np.asarray(obs["state.joint_pos"], dtype=np.float32)
-            return current_pos + delta
+            return current_pos + action_step
         # ABSOLUTE 或 DELTA: 直接作为目标
-        return delta.astype(np.float32)
+        return action_step.astype(np.float32)
 
     def reset_action_queue(self) -> None:
         """清空 action chunking 队列 (每次新 episode / reset 后调用)."""
@@ -304,9 +611,9 @@ class GR00TLocalInference:
             env_cfg = load_env_cfg(self.task_id, play=True)
             # 推理用单环境
             env_cfg.scene.num_envs = 1
-            # 默认 224x224 视频尺寸 (匹配 GR00T)
-            env_cfg.viewer.width = 224
-            env_cfg.viewer.height = 224
+            # GR00T 使用 256x256 图像 (image_target_size in processor_config.json)
+            env_cfg.viewer.width = 256
+            env_cfg.viewer.height = 256
             env = ManagerBasedRlEnv(cfg=env_cfg, device=self.device, render_mode="rgb_array")
             logger.info("✅ unitree_rl_mjlab 环境创建成功 (rgb_array)")
         except ImportError as e:
@@ -342,10 +649,15 @@ class GR00TLocalInference:
                         env.reset()
                         self.reset_action_queue()
                     obs = self._env_obs_to_dict(env, step)
-                    # 从 mjlab env 拿一帧 RGB
-                    frame = render_frame(env, height=224, width=224)
+                    # 从 mjlab env 拿一帧 RGB (256x256 for GR00T)
+                    frame = render_frame(env, height=256, width=256)
                     if frame is not None:
-                        obs["video.front_view"] = frame
+                        # 使用正确的 video key (ego_view)
+                        if self._policy is not None:
+                            video_key = self._policy.modality_configs["video"].modality_keys[0]
+                            obs[f"video.{video_key}"] = frame
+                        else:
+                            obs["video.ego_view"] = frame
                 except Exception as e:
                     if step == 0:
                         logger.debug("mjlab obs 获取失败: %s", e)
@@ -424,6 +736,7 @@ class GR00TLocalInference:
             return arr.astype(np.float32)
 
         # 与 collect_data.py 保持对称, 否则训练/推理分布不一致
+        # mjlab 返回的是 rel (=joint_pos - default), 还原为 abs
         jp_raw = raw.get("joint_pos_rel", raw.get("joint_pos"))
         jv_raw = raw.get("joint_vel_rel", raw.get("joint_vel"))
         bp = raw.get("base_pos") or raw.get("root_link_pos_w")
@@ -433,8 +746,8 @@ class GR00TLocalInference:
 
         if jp_raw is not None:
             jp = _np(jp_raw)
-            # 内容是 (joint_pos - default), 还原为绝对位置与 collect_data.py 对齐
-            mock["state.joint_pos"] = jp
+            # mjlab 返回的是 rel (=joint_pos - default), 还原为绝对位置
+            mock["state.joint_pos"] = jp + self.default_angles
         if jv_raw is not None:
             mock["state.joint_vel"] = _np(jv_raw)
         if bp is not None:
@@ -449,12 +762,15 @@ class GR00TLocalInference:
         return mock
 
     def _mock_observation(self, step: int) -> dict[str, Any]:
-        """生成模拟观测 (无仿真环境时使用)。"""
+        """生成模拟观测 (无仿真环境时使用)。
+
+        注意: 使用 ego_view 而非 front_view, 256x256 图像尺寸。
+        """
         t = step * 0.02
         # 确定性种子, 保证可复现
         rng = np.random.RandomState(42 + step)
         return {
-            "video.front_view": np.zeros((224, 224, 3), dtype=np.uint8),
+            "video.ego_view": np.zeros((256, 256, 3), dtype=np.uint8),
             "state.joint_pos": self.default_angles +
                 rng.randn(self.num_joints).astype(np.float32) * 0.01,
             "state.joint_vel": np.zeros(self.num_joints, dtype=np.float32),
@@ -486,8 +802,10 @@ def main():
     parser.add_argument("--viser-port", type=int, default=20006,
                         help="Viser 服务器端口 (默认: 20006)")
     parser.add_argument("--execution-horizon", type=int, default=1,
-                        help="Action chunking: 每次 GR00T 输出 16 步动作, "
-                             "顺序执行前 N 步再重新规划 (1=每步规划; 16=完整 chunking)")
+                        help="Action chunking: 每次 GR00T 输出多步动作, "
+                             "顺序执行前 N 步再重新规划 (1=每步规划)")
+    parser.add_argument("--embodiment-tag", type=str, default=None,
+                        help="指定 embodiment tag (默认从模型 processor_config.json 自动检测)")
     args = parser.parse_args()
 
     inference = GR00TLocalInference(
@@ -500,6 +818,7 @@ def main():
         instruction=args.instruction,
         viser=args.viser,
         viser_port=args.viser_port,
+        embodiment_tag=args.embodiment_tag,
     )
     inference.run_inference_loop(
         instruction=args.instruction,
