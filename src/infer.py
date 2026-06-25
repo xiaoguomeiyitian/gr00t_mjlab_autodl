@@ -61,6 +61,12 @@ class GR00TLocalInference:
         self.quantize = quantize
         self.device = device
         self.action_horizon = action_horizon
+        # 运行时校验: execution_horizon 不能超过 action_horizon
+        if execution_horizon > action_horizon:
+            logger.warning(
+                "execution_horizon (%d) > action_horizon (%d), 已裁剪为 %d",
+                execution_horizon, action_horizon, action_horizon,
+            )
         self.execution_horizon = max(1, min(execution_horizon, action_horizon))
         self.task_id = task_id or (
             "Mjlab-Velocity-Flat-Unitree-G1" if robot == "g1" else "Mjlab-Velocity-Flat-Unitree-Go2"
@@ -208,6 +214,18 @@ class GR00TLocalInference:
             device=str(self.device),
             strict=True,
         )
+        # ── 使用 PolicyHorizonSpec 统一 horizon 参数 (Isaac-GR00T 新特性) ──
+        try:
+            from gr00t.eval._horizon_contract import PolicyHorizonSpec
+            self._horizon_spec = PolicyHorizonSpec.from_policy(self._policy)
+            logger.info("  PolicyHorizonSpec: action_horizon=%d, n_action_steps=%d",
+                        self._horizon_spec.action_horizon, self._horizon_spec.n_action_steps)
+            # 同步 action_horizon (以权威源为准)
+            self.action_horizon = self._horizon_spec.action_horizon
+        except ImportError:
+            # 旧版 Isaac-GR00T 无 PolicyHorizonSpec, 回退到手动管理
+            logger.info("  PolicyHorizonSpec 不可用 (旧版 GR00T), 使用手动 horizon")
+            self._horizon_spec = None
         # ModalityConfigs: self._policy.modality_configs["action"].action_configs[0].rep
         action_modality = self._policy.modality_configs.get("action")
         if action_modality is None or not action_modality.action_configs:
@@ -382,6 +400,13 @@ class GR00TLocalInference:
 
         # ── 队列为空: 调 GR00T 重新规划 ──
         policy_obs = self._build_policy_observation(obs)
+
+        # ── 运行时观测格式校验 (Isaac-GR00T 新特性) ──
+        try:
+            self._policy.check_observation(policy_obs, strict=True)
+        except (AssertionError, ValueError) as e:
+            logger.warning("观测格式校验失败: %s (继续推理, 但结果可能不正确)", e)
+
         action_dict, _info = self._policy._get_action(policy_obs)  # dict[(B, T, D)]
 
         # 合并所有 action key 的结果

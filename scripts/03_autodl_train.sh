@@ -51,6 +51,10 @@ SAVE_ONLY_MODEL=true       # 只存模型权重 (省空间, 不可恢复训练)
 ACTION_MODE=""             # 动作空间: absolute | delta | relative_eef (留空: 从 data_dir/info.json 读)
 STATE_DROPOUT_PROB="0.05"  
 NUM_GPUS=1                 
+RESUME_FROM_CHECKPOINT=false  # 从 checkpoint 恢复训练 (新增)
+SHORTEST_IMAGE_EDGE=""        # 最短边缩放 (替代 legacy crop_size)
+CROP_FRACTION=""             # 裁剪比例
+EXTRA_AUGMENTATION_CONFIG=""  # mask 引导增强 JSON 路径
 
 # 云端路径 (与 00_autodl_init.sh 保持一致)
 GR00T_REPO="/root/Isaac-GR00T"
@@ -83,6 +87,10 @@ while [[ $# -gt 0 ]]; do
         --state-dropout-prob) STATE_DROPOUT_PROB="$2"; shift 2 ;;   
         --num-gpus)         NUM_GPUS="$2";         shift 2 ;;        
         --action-mode)      ACTION_MODE="$2";      shift 2 ;;
+        --resume-from-checkpoint) RESUME_FROM_CHECKPOINT=true; shift ;;
+        --shortest-image-edge) SHORTEST_IMAGE_EDGE="$2"; shift 2 ;;
+        --crop-fraction)   CROP_FRACTION="$2";    shift 2 ;;
+        --extra-augmentation-config) EXTRA_AUGMENTATION_CONFIG="$2"; shift 2 ;;
         -h|--help)
             sed -n '2,32p' "$0"
             exit 0
@@ -129,6 +137,7 @@ info "Learning Rate: $LEARNING_RATE"
 info "Tune LLM:      $TUNE_LLM  (官方默认 off; 启用需 80GB+ VRAM)"
 info "Tune Visual:   $TUNE_VISUAL  (官方默认 off; 启用需 80GB+ VRAM)"
 info "Save Only:     $SAVE_ONLY_MODEL  (true=省空间, false=可恢复训练)"
+info "Resume CKPT:   $RESUME_FROM_CHECKPOINT  (从 checkpoint 恢复训练)"
 info "GR00T 仓库:    $GR00T_REPO"
 info "数据目录:      $LEROBOT_DATA_DIR"
 info "输出 (final):  $OUTPUT_DIR  (官方训练输出, 直接可推理)"
@@ -291,6 +300,10 @@ EXTRA_ARGS=()
 [ "$TUNE_LLM" = true ]    && EXTRA_ARGS+=(--tune-llm)
 [ "$TUNE_VISUAL" = true ] && EXTRA_ARGS+=(--tune-visual)
 [ "$SAVE_ONLY_MODEL" = true ] && EXTRA_ARGS+=(--save-only-model)
+[ "$RESUME_FROM_CHECKPOINT" = true ] && EXTRA_ARGS+=(--resume-from-checkpoint)
+[ -n "$SHORTEST_IMAGE_EDGE" ] && EXTRA_ARGS+=(--shortest-image-edge "$SHORTEST_IMAGE_EDGE")
+[ -n "$CROP_FRACTION" ] && EXTRA_ARGS+=(--crop-fraction "$CROP_FRACTION")
+[ -n "$EXTRA_AUGMENTATION_CONFIG" ] && EXTRA_ARGS+=(--extra-augmentation-config "$EXTRA_AUGMENTATION_CONFIG")
 
 
 #        可被命令行 --state-dropout-prob 覆盖
