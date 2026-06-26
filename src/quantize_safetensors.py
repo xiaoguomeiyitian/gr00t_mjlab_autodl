@@ -88,8 +88,8 @@ def quantize_nf4(weight: np.ndarray, block_size: int = 64) -> tuple:
     # 打包: 每 2 个 4-bit 值打包成 1 个 uint8
     # 偶数索引在高 4 位，奇数索引在低 4 位
     indices_flat = indices.reshape(-1)
-    packed = np.zeros(len(indices_flat) // 2, dtype=np.uint8)
     packed = ((indices_flat[0::2] & 0x0F) << 4) | (indices_flat[1::2] & 0x0F)
+    packed = packed.astype(np.uint8)
 
     # scale 和 zero_point
     scale = absmax.flatten() / 1.0  # NF4 范围是 [-1, 1]，所以 scale = absmax

@@ -131,6 +131,10 @@ class TestPolicyObservationBuild:
         obs = self._make_mock_obs(frame)
         infer_instance._policy = MagicMock()
         infer_instance._policy.language_key = "annotation.human.task_description"
+        infer_instance._policy.modality_configs = {
+            "video": MagicMock(modality_keys=["front_view"]),
+            "state": MagicMock(modality_keys=["joint_pos", "joint_vel"]),
+        }
         out = infer_instance._build_policy_observation(obs)
         assert out["video"]["front_view"].shape == (1, 1, 224, 224, 3)
         assert out["video"]["front_view"].dtype == np.uint8
@@ -140,6 +144,10 @@ class TestPolicyObservationBuild:
         obs = self._make_mock_obs()
         infer_instance._policy = MagicMock()
         infer_instance._policy.language_key = "annotation.human.task_description"
+        infer_instance._policy.modality_configs = {
+            "video": MagicMock(modality_keys=["front_view"]),
+            "state": MagicMock(modality_keys=["joint_pos", "joint_vel"]),
+        }
         out = infer_instance._build_policy_observation(obs)
         for k, v in out["state"].items():
             assert v.shape == (1, 1, v.shape[-1]), f"state[{k}] shape={v.shape}"
@@ -151,6 +159,10 @@ class TestPolicyObservationBuild:
         obs = self._make_mock_obs()
         infer_instance._policy = MagicMock()
         infer_instance._policy.language_key = "annotation.human.task_description"
+        infer_instance._policy.modality_configs = {
+            "video": MagicMock(modality_keys=["front_view"]),
+            "state": MagicMock(modality_keys=["joint_pos", "joint_vel"]),
+        }
         out = infer_instance._build_policy_observation(obs)
         assert out["language"]["annotation.human.task_description"] == [["step back carefully"]]
 
@@ -161,6 +173,10 @@ class TestPolicyObservationBuild:
         obs["annotation.language.action_text"] = "from_obs"
         infer_instance._policy = MagicMock()
         infer_instance._policy.language_key = "annotation.human.task_description"
+        infer_instance._policy.modality_configs = {
+            "video": MagicMock(modality_keys=["front_view"]),
+            "state": MagicMock(modality_keys=["joint_pos", "joint_vel"]),
+        }
         out = infer_instance._build_policy_observation(obs)
         assert out["language"]["annotation.human.task_description"] == [["from_obs"]]
 
@@ -169,6 +185,10 @@ class TestPolicyObservationBuild:
         obs = self._make_mock_obs(frame=None)
         infer_instance._policy = MagicMock()
         infer_instance._policy.language_key = "annotation.human.task_description"
+        infer_instance._policy.modality_configs = {
+            "video": MagicMock(modality_keys=["front_view"]),
+            "state": MagicMock(modality_keys=["joint_pos", "joint_vel"]),
+        }
         out = infer_instance._build_policy_observation(obs)
         assert out["video"]["front_view"].sum() == 0
 
