@@ -884,75 +884,15 @@ def collect_demonstrations(
 
 
 def _get_per_key_obs(env_raw: Any) -> dict[str, Any]:
-    """从 unitree_rl_mjlab ManagerBasedRlEnv 取 per-key 观测 (dict[str, tensor]).
-
-    mjlab env.step() 返回的 obs 是按 actor/critic 拼接的 tensor,
-    这里直接通过 Entity.data 拿分组前的 dict (因为 mjlab ObservationManager
-    默认 concatenate_terms=True, 没有 per-key 访问接口).
-
-    """
-    out: dict[str, Any] = {}
-    try:
-        robot = env_raw.unwrapped.scene["robot"]
-        rd = robot.data
-        # base pose/velocity (mjlab root_link_* 字段, shape (num_envs, D))
-        out["base_pos"] = rd.root_link_pos_w
-        out["base_quat"] = rd.root_link_quat_w
-        out["base_lin_vel"] = rd.root_link_lin_vel_w
-        out["base_ang_vel"] = rd.root_link_ang_vel_w
-        # joint (mjlab Entity.data.joint_pos 是绝对位置; mjlab term `joint_pos`
-        #        func=mdp.joint_pos_rel 返回 rel, 此处用 Entity.data 绝对)
-        out["joint_pos"] = rd.joint_pos
-        out["joint_vel"] = rd.joint_vel
-    except Exception as e:
-        logger.debug("Entity.data 失败: %s", e)
-
-    return out
-
+    """从 mjlab 环境提取 per-key observations (委托给 mjlab_env 共享实现)."""
+    from mjlab_env import get_per_key_obs as _get
+    return _get(env_raw)
 
 
 def _render_frame(env_raw: Any, ep: int, step: int) -> np.ndarray | None:
-    """从 mjlab env 渲染一帧 RGB 图像 (H, W, 3) uint8.
-
-    多种 API 兼容性尝试:
-      1) env.render()                — gym-style (mjlab 已内置 _offline_renderer, 最优)
-      2) env.unwrapped.sim.mj_data   — 直接走 mujoco native offscreen (兼容)
-      3) viser / native viewer (需 DISPLAY)
-
-    """
-    if env_raw is None:
-        return None
-    # 方案 1: gym-style render (mjlab 内部用 _offline_renderer)
-    try:
-        frame = env_raw.render()
-        if frame is not None:
-            arr = np.asarray(frame)
-            if arr.dtype != np.uint8:
-                arr = (arr * 255).clip(0, 255).astype(np.uint8) if arr.max() <= 1.0 \
-                    else arr.clip(0, 255).astype(np.uint8)
-            return arr
-    except Exception:
-        pass
-    # 方案 2: mjlab sim.mj_data + mujoco.Renderer (兜底)
-    try:
-        sim = env_raw.unwrapped.sim
-        mj_model = sim.mj_model
-        mj_data = sim.mj_data
-        import mujoco  # noqa
-        from mujoco import Renderer
-        viewer_cfg = env_raw.unwrapped.cfg.viewer
-        h = int(getattr(viewer_cfg, "height", 224))
-        w = int(getattr(viewer_cfg, "width", 224))
-        renderer = Renderer(model=mj_model, height=h, width=w)
-        # mjlab ViewerConfig 没有 camera_name, 用 entity_name + body_name 推断
-        # 默认渲染 root body (-1 = free camera)
-        renderer.update_scene(mj_data, camera=-1)
-        frame = renderer.render()
-        return np.asarray(frame).astype(np.uint8)
-    except Exception as e:
-        if step == 0:
-            logger.debug("sim.render 失败: %s", e)
-    return None
+    """从 mjlab env 渲染一帧 RGB 图像 (委托给 mjlab_env 共享实现)."""
+    from mjlab_env import render_frame as _render
+    return _render(env_raw)
 
 
 def _simulate_observation(

@@ -174,7 +174,7 @@ run_native_step() {
 
 # ── Native shell: 进入 host venv shell (调试用) ──────────────────────
 start_native_shell() {
-    if [ ! ! -f "$VENV_DIR/bin/python" ]; then
+    if [ ! -f "$VENV_DIR/bin/python" ]; then
         fail "未找到 $VENV_DIR, 请先运行: ./install_native.sh"
     fi
     info "进入本机 venv shell (venv 已激活, 输入 'exit' 返回)"

@@ -447,6 +447,8 @@ def convert(
                 "episode_index": ep_idx,
                 "index":         global_index,
                 "timestamp":     float(step_idx * metadata.get("dt", 0.02)),
+                "observation.state": state_vec.tolist(),
+                "action":        action_vec.tolist(),
             }
 
             # 视频相对路径 (per-row 都写同一个, GR00T 内部抽帧)

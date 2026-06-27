@@ -19,3 +19,6 @@ venv/
 .vscode/
 .idea/
 *.swp
+.coverage
+htmlcov/
+.pytest_cache/

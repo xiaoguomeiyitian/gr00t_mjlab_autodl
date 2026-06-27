@@ -177,11 +177,10 @@ def export_int4_direct(model_dir: str, output_dir: str) -> str:
         if len(all_quantized_weights) > 0:
             output_sf = output_path / sf_name
             # 注意: bitsandbytes 的量化张量不能直接保存为 safetensors
-            # 我们需要用 PyTorch 的 save 格式
-            logger.info("  → 保存量化权重: %s", output_sf)
-            # 使用 torch.save 而不是 safetensors.save_file
-            # 因为量化张量是特殊的格式
-            st_torch.save_file(all_quantized_weights, str(output_sf))
+            # 使用 torch.save 格式 (.pt)
+            output_pt = output_path / sf_name.replace('.safetensors', '.pt')
+            logger.info("  → 保存量化权重: %s", output_pt)
+            torch.save(all_quantized_weights, str(output_pt))
             all_quantized_weights.clear()
 
     elapsed = time.time() - start_time

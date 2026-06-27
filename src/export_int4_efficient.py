@@ -158,9 +158,11 @@ def export_int4_efficient(model_dir: str, output_dir: str) -> str:
                     quantized_tensors[key] = tensor
 
         # 保存量化后的张量
-        import safetensors.torch as st_torch
-        st_torch.save_file(quantized_tensors, str(out_sf_path))
-        logger.info("  → 已保存: %s", out_sf_path)
+        # 注意: bitsandbytes 的量化张量不能直接保存为 safetensors
+        # 使用 torch.save 格式 (.pt)
+        out_pt_path = output_path / sf_name.replace('.safetensors', '.pt')
+        torch.save(quantized_tensors, str(out_pt_path))
+        logger.info("  → 已保存: %s", out_pt_path)
 
         # 释放内存
         del quantized_tensors

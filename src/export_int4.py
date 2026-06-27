@@ -120,7 +120,7 @@ def export_int4(
             logger.error("BF16 模型加载失败: %s", e)
             sys.exit(1)
 
-            model = base
+        model = base
         processor_source = str(model_path_obj)
 
     else:

@@ -24,7 +24,7 @@ import argparse
 import logging
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 
@@ -41,6 +41,16 @@ class GR00TLocalInference:
     在 unitree_rl_mjlab 仿真环境中加载 fine-tune 后的 GR00T 模型，
     接收 RGB 图像 + 本体感知 + 语言指令，输出关节动作。
     """
+
+    # G1 29 关节顺序 (来自 g1_config.py G1_JOINT_NAMES):
+    #   左腿 6, 右腿 6, 腰部 3, 左臂 7, 右臂 7 (共 29)
+    _PART_RANGES: ClassVar[dict[str, tuple[int, int]]] = {
+        "left_leg":  (0, 6),
+        "right_leg": (6, 12),
+        "waist":     (12, 15),
+        "left_arm":  (15, 22),
+        "right_arm": (22, 29),
+    }
 
     def __init__(
         self,
@@ -278,29 +288,20 @@ class GR00TLocalInference:
         full_joint_pos = obs.get("state.joint_pos")  # 已包含 default_angles (绝对位置)
         full_joint_vel = obs.get("state.joint_vel")
 
-        # body part 到 G1_JOINT_NAMES 中索引范围的映射
-        _part_ranges = {
-            "left_leg":  (0, 6),
-            "right_leg": (6, 12),
-            "waist":     (12, 15),
-            "left_arm":  (15, 22),
-            "right_arm": (22, 29),
-        }
-
         state = {}
         for model_state_key in modality_configs["state"].modality_keys:
             val = None
 
             # 1. 如果是 body part 类型 key, 从 full_joint_pos 中切片
-            if model_state_key in _part_ranges and full_joint_pos is not None:
-                start, end = _part_ranges[model_state_key]
+            if model_state_key in self._PART_RANGES and full_joint_pos is not None:
+                start, end = self._PART_RANGES[model_state_key]
                 jp = np.asarray(full_joint_pos, dtype=np.float32)
                 if jp.ndim == 0:
                     jp = jp.reshape(1)
                 val = jp[start:end]
             # 2. 如果是 joint_vel body part, 从 full_joint_vel 中切片
-            elif model_state_key in _part_ranges and full_joint_vel is not None:
-                start, end = _part_ranges[model_state_key]
+            elif model_state_key in self._PART_RANGES and full_joint_vel is not None:
+                start, end = self._PART_RANGES[model_state_key]
                 jv = np.asarray(full_joint_vel, dtype=np.float32)
                 if jv.ndim == 0:
                     jv = jv.reshape(1)
@@ -324,8 +325,8 @@ class GR00TLocalInference:
 
             # 5. fallback: 用 default_angles 填充
             if val is None:
-                if model_state_key in _part_ranges:
-                    start, end = _part_ranges[model_state_key]
+                if model_state_key in self._PART_RANGES:
+                    start, end = self._PART_RANGES[model_state_key]
                     val = self.default_angles[start:end].copy()
                 else:
                     val = np.zeros(1, dtype=np.float32)
@@ -353,16 +354,8 @@ class GR00TLocalInference:
         G1 29 关节顺序 (来自 g1_config.py G1_JOINT_NAMES):
           左腿 6, 右腿 6, 腰部 3, 左臂 7, 右臂 7 (共 29)
         """
-        # G1 29 关节顺序与 default_angles 的对应关系
-        _part_ranges = {
-            "left_leg":  (0, 6),
-            "right_leg": (6, 12),
-            "waist":     (12, 15),
-            "left_arm":  (15, 22),
-            "right_arm": (22, 29),
-        }
-        if model_state_key in _part_ranges:
-            start, end = _part_ranges[model_state_key]
+        if model_state_key in self._PART_RANGES:
+            start, end = self._PART_RANGES[model_state_key]
             return self.default_angles[start:end].copy()
         # hand / projected_gravity: 返回零值
         if "hand" in model_state_key:

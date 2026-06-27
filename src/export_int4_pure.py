@@ -329,9 +329,10 @@ def export_int4_pure(model_dir: str, output_dir: str) -> str:
 
         # 保存量化后的张量
         # 使用自定义格式保存
-        out_sf_path = output_path / sf_name
-        _save_quantized_tensors(all_quantized, str(out_sf_path))
-        logger.info("  → 已保存: %s", out_sf_path)
+        # 量化后的张量使用 torch.save 保存 (PyTorch pickle 格式), 扩展名为 .pt
+        out_pt_path = output_path / sf_name.replace('.safetensors', '.pt')
+        _save_quantized_tensors(all_quantized, str(out_pt_path))
+        logger.info("  → 已保存: %s", out_pt_path)
 
         # 释放内存
         all_quantized.clear()

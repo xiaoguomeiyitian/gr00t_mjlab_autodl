@@ -10,8 +10,7 @@ SSH_USER=""           # ← SSH 用户名 (AutoDL 通常是 root)
 # ── 认证 (二选一, 优先用密钥) ──────────────────────────────────────────────
 SSH_KEY=""            # ← SSH 私钥路径, 例: "$HOME/.ssh/id_rsa_autodl"
                       #    留空 = 走密码认证 (每次会提示输入密码)
-SSH_PASS=""           # ← SSH 密码 (强烈不推荐明文写在文件里)
-                      #    留空 + 没用密钥 = sshpass / expect 交互输入
+                      #    注意: 不支持明文密码, 请使用 ssh-agent 或密钥认证
 
 # ── 云端路径 (一般不用改) ──────────────────────────────────────────────────
 REMOTE_DIR="/root/workspace"        # 云端工作目录 (训练包 + 模型都放这里)
@@ -20,7 +19,15 @@ CONDA_ENV=""                        # 云端 Python 虚拟环境名 (留空用 b
 # ── 上传选项 ───────────────────────────────────────────────────────────────
 SCP_BANDWIDTH_LIMIT=""              # 限速, 例: "100M" (留空不限)
                                     #   网络不稳时建议 "50M", 减少断连概率
-SSH_OPTS="-o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=6"
+# ── SSH 安全选项 ──────────────────────────────────────────────────────
+# 默认禁用 StrictHostKeyChecking (自动化场景), 但可通过环境变量覆盖
+# 安全建议: 生产环境设置 SSH_STRICT=yes 启用主机密钥验证
+if [ "${SSH_STRICT:-}" = "yes" ]; then
+    STRICT_OPT="-o StrictHostKeyChecking=yes"
+else
+    STRICT_OPT="-o StrictHostKeyChecking=no"
+fi
+SSH_OPTS="$STRICT_OPT -o ServerAliveInterval=30 -o ServerAliveCountMax=6"
                                     # 保活参数 (每 30s 心跳, 6 次失败重连)
 
 # 示例:
