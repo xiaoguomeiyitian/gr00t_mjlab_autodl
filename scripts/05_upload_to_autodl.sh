@@ -8,8 +8,8 @@ source "$SCRIPT_DIR/config/ssh_config.sh"
 
 # ─── 默认参数 ───
 ROBOT="${1:-g1}"
-RAW_DIR="${2:-$SCRIPT_DIR/../${ROBOT}_raw}"
-LEROBOT_DIR="${3:-$SCRIPT_DIR/../${ROBOT}_lerobot}"
+RAW_DIR="${2:-$SCRIPT_DIR/../output/${ROBOT}_raw}"
+LEROBOT_DIR="${3:-$SCRIPT_DIR/../output/${ROBOT}_lerobot}"
 REMOTE_DIR="${4:-/root/training_data}"
 MODALITY_CONFIG="${5:-$SCRIPT_DIR/src/configs/${ROBOT}_modality_config.py}"
 

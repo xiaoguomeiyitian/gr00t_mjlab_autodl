@@ -10,7 +10,7 @@ ROBOT="${1:-g1}"
 NUM_EPISODES="${2:-50}"
 EPISODE_LENGTH="${3:-300}"
 ACTION_MODE="${4:-delta}"
-OUTPUT_DIR="${5:-$SCRIPT_DIR/../${ROBOT}_raw}"
+OUTPUT_DIR="${5:-$SCRIPT_DIR/../output/${ROBOT}_raw}"
 
 echo "🤖 数据采集"
 echo "   机器人: $ROBOT"
