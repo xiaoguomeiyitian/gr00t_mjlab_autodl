@@ -15,10 +15,10 @@ NVIDIA Isaac-GR00T 的云端推理 + 本地训练编排兄弟项目。
 ## 端到端流程
 
 ```
-[0] 云端初始化 → [1] 启动 Server → [2] SSH 隧道 → [3] Demo 推理
-[4] 本地采集 → [5] 转换+上传 → [6] 云端训练
-[7] 下载模型 → [8] INT4 量化 → [9] 本地验证
-[3] Demo 静态图  |  [10] Viser 浏览器  |  [11] MuJoCo 原生
+云端: [0] 初始化 → [1] 启动 Server → [3] 微调训练
+本地: [4] SSH 隧道 → [5] Demo 推理 → [6] 数据采集 → [7] 转换+上传
+      [8] 下载模型 → [9] INT4 量化 → [10] 推理验证
+可视化: [11] Viser + Policy Server 推理  [12] MuJoCo + Policy Server 推理
 ```
 
 ## 快速上手
@@ -47,8 +47,8 @@ NVIDIA Isaac-GR00T 的云端推理 + 本地训练编排兄弟项目。
 ./start.sh quantize [robot]
 ./start.sh verify [robot] [vis_mode: demo|viser|mujoco]
 
-./start.sh viser [robot] [port]
-./start.sh mujoco [robot]
+./start.sh viser-infer [robot] [host] [port] [viser_port]
+./start.sh mujoco-infer [robot] [host] [port]
 ```
 
 ### 2. Demo 推理
@@ -83,11 +83,17 @@ bash scripts/08_local_quantize.sh g1                        # INT4 量化
 bash scripts/09_local_verify.sh g1 demo                     # 推理验证
 ```
 
-### 5. 可视化
+### 5. 推理可视化（Viser / MuJoCo）
 
 ```bash
-bash scripts/10_local_viser_client.sh g1                    # 浏览器可视化
-bash scripts/11_local_mujoco_client.sh g1                   # MuJoCo 桌面窗口
+# 交互式
+./start.sh
+# 选择 11) Viser + Policy Server 推理可视化
+# 选择 12) MuJoCo + Policy Server 推理可视化
+
+# 非交互
+./start.sh viser-infer g1 127.0.0.1 5555 20006
+./start.sh mujoco-infer g1 127.0.0.1 5555
 ```
 
 ## 目录结构
@@ -110,9 +116,7 @@ gr00t_mjlab_autodl/
 │   ├── 07_download_model.sh           # [本地] 下载模型
 │   ├── 08_local_quantize.sh           # [本地] INT4 量化
 │   ├── 09_local_verify.sh             # [本地] 推理验证
-│   ├── 10_local_viser_client.sh       # [本地] Viser 浏览器可视化
-│   └── 11_local_mujoco_client.sh      # [本地] MuJoCo 原生可视化
-├── src/                               # 源码（2831 行 Python）
+├── src/                               # 源码（3955 行 Python）
 │   ├── __init__.py
 │   ├── policy_client.py               # 纯 ZMQ 客户端（不依赖 torch）
 │   ├── observation_builder.py         # 观测格式构建
@@ -129,11 +133,17 @@ gr00t_mjlab_autodl/
 │   │   ├── g1_config.py               # G1 人形机器人配置（29 关节）
 │   │   ├── go2_config.py              # Go2 四足机器人配置（12 关节）
 │   │   ├── g1_modality_config.py      # G1 ModalityConfig（训练用）
-│   │   └── go2_modality_config.py     # Go2 ModalityConfig（训练用）
+│   │   ├── go2_modality_config.py     # Go2 ModalityConfig（训练用）
+│   │   ├── h1_modality_config.py      # H1 ModalityConfig（训练用）
+│   │   ├── h1_with_hand_modality_config.py  # H1+Hand ModalityConfig
+│   │   ├── h1_2_modality_config.py    # H1.2 ModalityConfig（训练用）
+│   │   └── h2_modality_config.py      # H2 ModalityConfig（训练用）
 │   └── viz/
 │       ├── __init__.py
 │       ├── viser_viewer.py            # Viser 浏览器 3D 可视化
-│       └── mujoco_viewer.py           # MuJoCo 桌面窗口可视化
+│       ├── mujoco_viewer.py           # MuJoCo 桌面窗口可视化
+│       ├── viser_infer.py             # Viser + Policy Server 推理可视化
+│       └── mujoco_infer.py            # MuJoCo + Policy Server 推理可视化
 ├── tests/                             # 单元测试（116 个测试）
 │   ├── conftest.py
 │   ├── test_configs.py
@@ -184,19 +194,24 @@ pip install pytest
 uv sync --python 3.10
 ```
 
-## 三种可视化方案
+## 四种可视化方案
 
 | 方案 | 技术 | 输出 | 适用场景 |
 |------|------|------|----------|
 | A: Demo 静态图 | matplotlib | JPEG + MSE/MAE | 快速验证、写报告 |
-| B: Viser 浏览器 | viser + MuJoCo | 浏览器 GUI (:20006) | 远程查看、无桌面 |
-| C: MuJoCo 原生 | mujoco.viewer | 桌面窗口 | 本地调试、最低延迟 |
+| B: Viser 推理可视化 | viser + Policy Server | 浏览器 GUI (:20006) | 远程查看推理动作 |
+| C: MuJoCo 推理可视化 | mujoco.viewer + Policy Server | 桌面窗口 | 本地调试推理动作 |
+| D: Viser 纯3D查看 | viser | 浏览器 GUI (:20006) | 仅查看模型（无推理） |
 
 ## 支持的机器人
 
 | 机器人 | 关节数 | 状态维度 | 动作维度 | 相机 |
 |--------|--------|----------|----------|------|
 | G1 人形 | 29 | 71 | 29 | front, wrist |
+| H1 人形 | 20 | 53 | 20 | front, wrist |
+| H1+Hand 人形 | 46 | 99 | 46 | front, wrist |
+| H1.2 人形 | 52 | 105 | 52 | front, wrist |
+| H2 人形 | 32 | 65 | 32 | front, wrist |
 | Go2 四足 | 12 | 37 | 12 | front, back |
 
 ## 测试
@@ -239,7 +254,7 @@ pytest tests/test_collect_data.py -v
 - ✅ INT4 量化（离线/在线） + 本地推理包装器
 - ✅ Viser / MuJoCo 可视化
 - ✅ 116 个单元测试全部通过
-- 📦 源码 2831 行 + 测试 4007 行
+- 📦 源码 3955 行 + 测试 1176 行
 
 ---
 
