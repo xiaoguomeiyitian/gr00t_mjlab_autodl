@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # ─── 默认参数 ───
 ROBOT="${1:-g1}"
 MODEL_PATH="${2:-$SCRIPT_DIR/../checkpoints/${ROBOT}_int4}"
-DATASET_PATH="${3:-$SCRIPT_DIR/../output/${ROBOT}_lerobot}"
+DATASET_PATH="${3:-$SCRIPT_DIR/output/${ROBOT}_lerobot}"
 OUTPUT_DIR="${4:-$SCRIPT_DIR/../output/verify}"
 VIS_MODE="${5:-demo}"  # demo / viser / mujoco
 

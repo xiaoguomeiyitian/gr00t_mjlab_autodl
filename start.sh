@@ -124,7 +124,7 @@ run_collect() {
     local num_episodes="${2:-50}"
     local episode_length="${3:-300}"
     local action_mode="${4:-delta}"
-    local output_dir="${5:-$SCRIPT_DIR/../output/${robot}_raw}"
+    local output_dir="${5:-$SCRIPT_DIR/output/${robot}_raw}"
     echo -e "${GREEN}🤖 数据采集 (${robot})...${NC}"
     echo ""
     bash "$SCRIPT_DIR/scripts/04_local_collect.sh" "$robot" "$num_episodes" "$episode_length" "$action_mode" "$output_dir"
