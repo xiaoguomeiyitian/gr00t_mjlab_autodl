@@ -38,18 +38,21 @@ show_menu() {
     echo -e "${CYAN}║   GR00T MJLab AutoDL — 云端推理 + 本地训练编排          ║${NC}"
     echo -e "${CYAN}╠══════════════════════════════════════════════════════════╣${NC}"
     echo -e "${CYAN}║${NC}                                                          ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${GREEN}═══ 云端操作 ═══${NC}                                        ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}   ${GREEN}1)${NC} 云端 — 环境初始化（一次性）                         ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}   ${GREEN}2)${NC} 云端 — 启动 Policy Server                             ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}   ${GREEN}3)${NC} 本地 — 建立 SSH 隧道                                ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}   ${GREEN}4)${NC} 本地 — Demo 推理                                     ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}   ${CYAN}5)${NC} 本地 — MJLab 数据采集                                ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}   ${CYAN}6)${NC} 本地 — 转换格式 + 上传到 AutoDL                       ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}   ${CYAN}7)${NC} 云端 — 微调训练                                       ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}   ${YELLOW}8)${NC} 本地 — 下载模型                                       ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}   ${YELLOW}9)${NC} 本地 — INT4 量化                                       ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}   ${YELLOW}10)${NC} 本地 — 推理验证                                     ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}   ${RED}11)${NC} Viser 浏览器 3D 可视化                              ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}   ${RED}12)${NC} MuJoCo 桌面窗口可视化                               ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${GREEN}3)${NC} 云端 — 微调训练                                       ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}                                                          ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${CYAN}═══ 本地操作 ═══${NC}                                        ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${CYAN}4)${NC} 本地 — 建立 SSH 隧道                                ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${CYAN}5)${NC} 本地 — Demo 推理（需隧道）                          ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${CYAN}6)${NC} 本地 — MJLab 数据采集                                ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${CYAN}7)${NC} 本地 — 转换格式 + 上传到 AutoDL                     ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${YELLOW}8)${NC} 本地 — 下载模型                                     ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${YELLOW}9)${NC} 本地 — INT4 量化                                     ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${YELLOW}10)${NC} 本地 — 推理验证                                    ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${RED}11)${NC} Viser 浏览器 3D 可视化                             ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${RED}12)${NC} MuJoCo 桌面窗口可视化                              ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}                                                          ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}   ${YELLOW}S)${NC} 查看配置                                            ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}   ${YELLOW}H)${NC} 查看帮助                                            ${CYAN}║${NC}"
@@ -305,25 +308,25 @@ while true; do
             get_defaults
             run_server
             ;;
-        3) run_tunnel ;;
-        4)
+        3)
+            select_robot
+            run_train "${robot}"
+            ;;
+        4) run_tunnel ;;
+        5)
             get_defaults
             run_demo
             ;;
-        5)
+        6)
             select_robot
             echo -n "Episode 数 [50]: " && read num_ep
             echo -n "每步长度 [300]: " && read ep_len
             echo -n "动作模式 [delta]: " && read act_mode
             run_collect "${robot}" "${num_ep:-50}" "${ep_len:-300}" "${act_mode:-delta}"
             ;;
-        6)
-            select_robot
-            run_upload "${robot}"
-            ;;
         7)
             select_robot
-            run_train "${robot}"
+            run_upload "${robot}"
             ;;
         8)
             select_robot
