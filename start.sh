@@ -49,19 +49,20 @@ while true; do
             echo ""
             echo -e "${GREEN}🚀 启动 Policy Server...${NC}"
             echo ""
-            read -p "  模型路径 [nvidia/GR00T-N1.7-3B]: " model_path
-            read -p "  具身标签 [OXE_DROID_RELATIVE_EEF_RELATIVE_JOINT]: " embodiment_tag
-            read -p "  端口 [5555]: " port
+            model_path="nvidia/GR00T-N1.7-3B"
+            embodiment_tag="OXE_DROID_RELATIVE_EEF_RELATIVE_JOINT"
+            port=5555
 
-            model_path=${model_path:-nvidia/GR00T-N1.7-3B}
-            embodiment_tag=${embodiment_tag:-OXE_DROID_RELATIVE_EEF_RELATIVE_JOINT}
-            port=${port:-5555}
+            echo "   模型: $model_path"
+            echo "   具身: $embodiment_tag"
+            echo "   端口: $port"
+            echo ""
 
             bash "$SCRIPT_DIR/scripts/01_start_server.sh" "$model_path" "$embodiment_tag" "$port"
             ;;
         3)
             echo ""
-            echo -e "${GREEN}� 建立 SSH 隧道...${NC}"
+            echo -e "${GREEN}🔒 建立 SSH 隧道...${NC}"
             echo ""
             bash "$SCRIPT_DIR/scripts/02_local_tunnel.sh"
             ;;
@@ -69,17 +70,17 @@ while true; do
             echo ""
             echo -e "${GREEN}🚀 运行 Demo 推理...${NC}"
             echo ""
-            read -p "  数据集路径 [../Isaac-GR00T/demo_data/droid_sample]: " dataset_path
-            read -p "  具身标签 [OXE_DROID_RELATIVE_EEF_RELATIVE_JOINT]: " embodiment_tag
-            read -p "  服务器地址 [127.0.0.1]: " host
-            read -p "  端口 [5555]: " port
-            read -p "  输出目录 [./output]: " output_dir
+            dataset_path="$SCRIPT_DIR/../Isaac-GR00T/demo_data/droid_sample"
+            embodiment_tag="OXE_DROID_RELATIVE_EEF_RELATIVE_JOINT"
+            host="127.0.0.1"
+            port=5555
+            output_dir="$SCRIPT_DIR/../output"
 
-            dataset_path=${dataset_path:-../Isaac-GR00T/demo_data/droid_sample}
-            embodiment_tag=${embodiment_tag:-OXE_DROID_RELATIVE_EEF_RELATIVE_JOINT}
-            host=${host:-127.0.0.1}
-            port=${port:-5555}
-            output_dir=${output_dir:-./output}
+            echo "   数据集: $dataset_path"
+            echo "   具身: $embodiment_tag"
+            echo "   服务器: ${host}:${port}"
+            echo "   输出: $output_dir"
+            echo ""
 
             bash "$SCRIPT_DIR/scripts/03_local_demo_eval.sh" "$dataset_path" "$embodiment_tag" "$host" "$port" "$output_dir"
             ;;

@@ -47,6 +47,7 @@ bash scripts/03_local_demo_eval.sh
 gr00t_mjlab_autodl/
 ├── README.md                          # 本文件
 ├── .gitignore
+├── start.sh                           # 交互式统一入口
 ├── config/
 │   └── ssh_config.sh                  # SSH 配置（用户填写）
 ├── scripts/
@@ -56,10 +57,11 @@ gr00t_mjlab_autodl/
 │   └── 03_local_demo_eval.sh          # [本地] Demo 推理
 └── src/
     ├── __init__.py
-    ├── policy_client.py               # ZMQ 通信封装
+    ├── policy_client.py               # 纯 ZMQ 客户端（不依赖 torch）
     ├── observation_builder.py         # 观测格式构建
     ├── demo_plotter.py                # 静态图渲染
-    └── demo_eval.py                   # 推理主逻辑
+    ├── demo_eval.py                   # 推理主逻辑
+    └── lerobot_loader.py              # LeRobot 数据加载器（独立实现）
 ```
 
 ## 前置条件

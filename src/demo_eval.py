@@ -5,21 +5,14 @@ Demo Eval — 本地开环推理评估。
 """
 
 import os
-import sys
 from typing import Optional
 
 import numpy as np
 
-# 自动查找 Isaac-GR00T 路径
-_ISAAC_GR00T_PATH = os.path.join(os.path.dirname(__file__), "../../Isaac-GR00T")
-if os.path.exists(_ISAAC_GR00T_PATH) and _ISAAC_GR00T_PATH not in sys.path:
-    sys.path.insert(0, _ISAAC_GR00T_PATH)
-
-from gr00t.data.dataset.lerobot_episode_loader import LeRobotEpisodeLoader
-
 from src.policy_client import GR00TClient
 from src.observation_builder import ObservationBuilder
 from src.demo_plotter import plot_trajectory_comparison
+from src.lerobot_loader import LeRobotEpisodeLoader
 
 
 def run_demo_eval(
