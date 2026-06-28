@@ -29,6 +29,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
 NC='\033[0m'
 
 # ─── 菜单 ───
@@ -53,6 +54,7 @@ show_menu() {
     echo -e "${CYAN}║${NC}   ${YELLOW}10)${NC} 本地 — 推理验证                                    ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}   ${RED}11)${NC} Viser 浏览器 3D 可视化                             ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}   ${RED}12)${NC} MuJoCo 桌面窗口可视化                              ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${MAGENTA}13)${NC} Viser + Policy Server 推理可视化                  ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}                                                          ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}   ${YELLOW}S)${NC} 查看配置                                            ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}   ${YELLOW}H)${NC} 查看帮助                                            ${CYAN}║${NC}"
@@ -183,7 +185,24 @@ run_mujoco() {
     echo ""
     bash "$SCRIPT_DIR/scripts/11_local_mujoco_client.sh" "$robot"
 }
-
+run_viser_infer() {
+    local robot="${1:-g1}"
+    local host="${2:-127.0.0.1}"
+    local port="${3:-5555}"
+    local viser_port="${4:-20006}"
+    echo -e "${GREEN}� Viser + Policy Server 推理可视化 (${robot})...${NC}"
+    echo ""
+    echo "   Policy Server: ${host}:${port}"
+    echo "   Viser 端口: ${viser_port}"
+    echo ""
+    python3 -m src.viz.viser_infer \
+        --robot "$robot" \
+        --host "$host" \
+        --port "$port" \
+        --viser-port "$viser_port" \
+        --dataset "$DATASET_PATH" \
+        --embodiment-tag "$EMBODIMENT_TAG"
+}
 show_config() {
     echo -e "${YELLOW}📋 当前配置:${NC}"
     echo ""
@@ -214,6 +233,7 @@ show_help() {
     echo "    ./start.sh quantize [robot]"
     echo "    ./start.sh verify [robot] [vis_mode: demo|viser|mujoco]"
     echo "    ./start.sh viser [robot] [port]"
+    echo "    ./start.sh viser-infer [robot] [host] [port] [viser_port]"
     echo "    ./start.sh mujoco [robot]"
     echo ""
     echo "  robot 可选: g1, h1, h1_with_hand, h1_2, h2, go2"
@@ -287,6 +307,11 @@ case "${1:-}" in
         run_viser "$2" "$3"
         exit 0
         ;;
+    viser-infer)
+        get_defaults
+        run_viser_infer "$2" "$3" "$4" "$5"
+        exit 0
+        ;;
     mujoco)
         run_mujoco "$2"
         exit 0
@@ -349,6 +374,14 @@ while true; do
         12)
             select_robot
             run_mujoco "${robot}"
+            ;;
+        13)
+            get_defaults
+            select_robot
+            echo -n "Policy Server 地址 [${HOST}]: " && read host
+            echo -n "Policy Server 端口 [${PORT}]: " && read port
+            echo -n "Viser 端口 [20006]: " && read viser_port
+            run_viser_infer "${robot}" "${host:-${HOST}}" "${port:-${PORT}}" "${viser_port:-20006}"
             ;;
         [sS]) show_config ;;
         [hH]) show_help ;;
