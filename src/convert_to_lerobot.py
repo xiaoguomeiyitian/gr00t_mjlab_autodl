@@ -59,10 +59,19 @@ def convert_to_lerobot(
     else:
         collection_meta = {}
 
-    state_dim = collection_meta.get("state_dim", 71 if robot == "g1" else 37)
-    action_dim = collection_meta.get("action_dim", 29 if robot == "g1" else 12)
-    num_joints = collection_meta.get("num_joints", 29 if robot == "g1" else 12)
-    camera_names = collection_meta.get("camera_names", ["front", "wrist"] if robot == "g1" else ["front", "back"])
+    _robot_defaults = {
+        "g1":           {"state_dim": 71, "action_dim": 29, "num_joints": 29, "camera_names": ["front", "wrist"]},
+        "h1":           {"state_dim": 53, "action_dim": 20, "num_joints": 20, "camera_names": ["front", "wrist"]},
+        "h1_with_hand": {"state_dim": 105, "action_dim": 46, "num_joints": 46, "camera_names": ["front", "wrist"]},
+        "h1_2":         {"state_dim": 117, "action_dim": 52, "num_joints": 52, "camera_names": ["front", "wrist"]},
+        "h2":           {"state_dim": 77, "action_dim": 32, "num_joints": 32, "camera_names": ["front", "wrist"]},
+        "go2":          {"state_dim": 37, "action_dim": 12, "num_joints": 12, "camera_names": ["front", "back"]},
+    }
+    defaults = _robot_defaults.get(robot, _robot_defaults["g1"])
+    state_dim = collection_meta.get("state_dim", defaults["state_dim"])
+    action_dim = collection_meta.get("action_dim", defaults["action_dim"])
+    num_joints = collection_meta.get("num_joints", defaults["num_joints"])
+    camera_names = collection_meta.get("camera_names", defaults["camera_names"])
 
     # 收集所有 episode 文件
     npz_files = sorted(input_path.glob("episode_*.npz"))
@@ -229,7 +238,8 @@ def main():
                         help="原始数据目录（含 episode_*.npz + episode_*.mp4）")
     parser.add_argument("--output-dir", type=str, required=True,
                         help="输出 LeRobot v2 数据集目录")
-    parser.add_argument("--robot", type=str, default="g1", choices=["g1", "go2"],
+    parser.add_argument("--robot", type=str, default="g1",
+                        choices=["g1", "h1", "h1_with_hand", "h1_2", "h2", "go2"],
                         help="机器人类型")
     parser.add_argument("--task-description", type=str, default="perform the locomotion task",
                         help="语言任务描述")
