@@ -3,7 +3,7 @@ Go2 四足机器人 ModalityConfig — 用于 Isaac-GR00T 微调训练。
 
 在 AutoDL 云端运行：
     python gr00t/experiment/launch_finetune.py \
-        --modality-config-path /root/training_data/go2_modality_config.py \
+        --modality-config-path /autodl-fs/data/gr00t_mjlab_autodl/go2_modality_config.py \
         ...
 """
 

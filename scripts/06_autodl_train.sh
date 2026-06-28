@@ -45,7 +45,7 @@ ssh -p ${SSH_PORT} ${SSH_USER}@${SSH_HOST} << REMOTE_SCRIPT
     echo ""
 
     echo "🚀 开始训练..."
-    cd /root/Isaac-GR00T
+    cd /autodl-fs/data/Isaac-GR00T
 
     # 检查 uv 是否可用
     if command -v uv &> /dev/null; then
