@@ -3,7 +3,7 @@ G1 人形机器人 ModalityConfig — 用于 Isaac-GR00T 微调训练。
 
 在 AutoDL 云端运行：
     python gr00t/experiment/launch_finetune.py \
-        --modality-config-path /autodl-fs/data/gr00t_mjlab_autodl/g1_modality_config.py \
+        --modality-config-path /root/gr00t_mjlab_autodl/g1_modality_config.py \
         ...
 """
 
