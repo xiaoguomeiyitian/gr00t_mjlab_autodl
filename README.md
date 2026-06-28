@@ -1,98 +1,216 @@
 # GR00T MJLab AutoDL
 
-NVIDIA Isaac-GR00T 的云端推理编排兄弟项目。
+NVIDIA Isaac-GR00T 的云端推理 + 本地训练编排兄弟项目。
 
 ## 定位
 
-本项目**不修改** Isaac-GR00T 代码，仅通过 ZMQ 接口远程调用云端推理服务。
+本项目**不修改** Isaac-GR00T 代码，通过 ZMQ 接口远程调用云端推理服务，并提供本地数据采集、INT4 量化、多种可视化方案。
 
 ```
 本地（无 GPU）──SSH 隧道──► AutoDL 云端（GPU）
                                     │
-                         Isaac-GR00T Policy Server
+                         Isaac-GR00T Policy Server / Fine-tune
+```
+
+## 端到端流程
+
+```
+[0] 云端初始化 → [1] 启动 Server → [2] SSH 隧道 → [3] Demo 推理
+[4] 本地采集 → [5] 转换+上传 → [6] 云端训练
+[7] 下载模型 → [8] INT4 量化 → [9] 本地验证
+[3] Demo 静态图  |  [10] Viser 浏览器  |  [11] MuJoCo 原生
 ```
 
 ## 快速上手
 
-### 1. 云端（AutoDL）
+### 1. 统一入口
 
 ```bash
-# 克隆本项目（与 Isaac-GR00T 同级目录）
-git clone <repo-url> gr00t_mjlab_autodl
-cd gr00t_mjlab_autodl
-
-# 一次性环境初始化
-bash scripts/00_autodl_init.sh
-
-# 启动推理服务
-bash scripts/01_start_server.sh nvidia/GR00T-N1.7-3B OXE_DROID_RELATIVE_EEF_RELATIVE_JOINT
+./start.sh              # 交互式菜单（13 个功能）
+./start.sh help         # 查看所有命令
 ```
 
-### 2. 本地
+非交互模式：
 
 ```bash
-# 配置 SSH 连接信息
-vim config/ssh_config.sh  # 填写 AutoDL 信息
+./start.sh init         云端环境初始化
+./start.sh server       云端启动 Policy Server
+./start.sh tunnel       本地建立 SSH 隧道
+./start.sh demo         本地运行 Demo 推理
+./start.sh auto         完整流程：tunnel → demo
 
-# 建立 SSH 隧道（保持运行）
-bash scripts/02_local_tunnel.sh
+./start.sh collect [robot] [num_episodes] [episode_length] [action_mode]
+./start.sh upload [robot]
+./start.sh train [robot]
 
-# 运行 Demo 推理（另开终端）
-bash scripts/03_local_demo_eval.sh
+./start.sh download [robot]
+./start.sh quantize [robot]
+./start.sh verify [robot] [vis_mode: demo|viser|mujoco]
+
+./start.sh viser [robot] [port]
+./start.sh mujoco [robot]
+```
+
+### 2. Demo 推理
+
+```bash
+# 云端（AutoDL）
+bash scripts/00_local_prepare_cache.sh                      # 本地准备 uv 缓存（一次性）
+bash scripts/00_autodl_init.sh                              # 云端环境初始化
+bash scripts/01_start_server.sh nvidia/GR00T-N1.7-3B ...    # 启动推理服务
+
+# 本地
+bash scripts/02_local_tunnel.sh                             # SSH 隧道
+bash scripts/03_local_demo_eval.sh                          # Demo 推理
+```
+
+### 3. 数据采集 + 训练
+
+```bash
+# 本地
+bash scripts/04_local_collect.sh g1 50 300 delta            # 采集 50 episodes
+bash scripts/05_upload_to_autodl.sh g1                      # 转换格式 + 上传
+
+# 云端（AutoDL）
+bash scripts/06_autodl_train.sh g1                          # 微调训练
+```
+
+### 4. 量化 + 本地推理
+
+```bash
+bash scripts/07_download_model.sh g1                        # 下载模型
+bash scripts/08_local_quantize.sh g1                        # INT4 量化
+bash scripts/09_local_verify.sh g1 demo                     # 推理验证
+```
+
+### 5. 可视化
+
+```bash
+bash scripts/10_local_viser_client.sh g1                    # 浏览器可视化
+bash scripts/11_local_mujoco_client.sh g1                   # MuJoCo 桌面窗口
 ```
 
 ## 目录结构
 
 ```
 gr00t_mjlab_autodl/
-├── README.md                          # 本文件
-├── .gitignore
-├── start.sh                           # 交互式统一入口
+├── README.md
+├── start.sh                           # 统一入口（交互/非交互 13 个功能）
 ├── config/
 │   └── ssh_config.sh                  # SSH 配置（用户填写）
 ├── scripts/
+│   ├── 00_local_prepare_cache.sh      # [本地] 准备 uv 缓存（一次性）
 │   ├── 00_autodl_init.sh              # [云端] 环境初始化
 │   ├── 01_start_server.sh             # [云端] 启动 Policy Server
-│   ├── 02_local_tunnel.sh             # [本地] 建立 SSH 隧道
-│   └── 03_local_demo_eval.sh          # [本地] Demo 推理
-└── src/
-    ├── __init__.py
-    ├── policy_client.py               # 纯 ZMQ 客户端（不依赖 torch）
-    ├── observation_builder.py         # 观测格式构建
-    ├── demo_plotter.py                # 静态图渲染
-    ├── demo_eval.py                   # 推理主逻辑
-    └── lerobot_loader.py              # LeRobot 数据加载器（独立实现）
+│   ├── 02_local_tunnel.sh             # [本地] SSH 隧道
+│   ├── 03_local_demo_eval.sh          # [本地] Demo 推理
+│   ├── 04_local_collect.sh            # [本地] MJLab 数据采集
+│   ├── 05_upload_to_autodl.sh         # [本地] 格式转换 + SCP 上传
+│   ├── 06_autodl_train.sh             # [云端] 微调训练
+│   ├── 07_download_model.sh           # [本地] 下载模型
+│   ├── 08_local_quantize.sh           # [本地] INT4 量化
+│   ├── 09_local_verify.sh             # [本地] 推理验证
+│   ├── 10_local_viser_client.sh       # [本地] Viser 浏览器可视化
+│   └── 11_local_mujoco_client.sh      # [本地] MuJoCo 原生可视化
+├── src/                               # 源码（2831 行 Python）
+│   ├── __init__.py
+│   ├── policy_client.py               # 纯 ZMQ 客户端（不依赖 torch）
+│   ├── observation_builder.py         # 观测格式构建
+│   ├── demo_plotter.py                # 静态图渲染
+│   ├── demo_eval.py                   # 推理主逻辑
+│   ├── lerobot_loader.py              # LeRobot 数据加载器
+│   ├── collect_data.py                # MJLab 仿真数据采集
+│   ├── convert_to_lerobot.py          # npz+mp4 → LeRobot v2 格式转换
+│   ├── export_int4.py                 # INT4 量化导出（BitsAndBytes）
+│   ├── export_int4_offline.py         # INT4 离线量化（无网络）
+│   ├── quantize_safetensors.py        # NF4 查找表量化核心
+│   ├── infer.py                       # 本地推理包装器
+│   ├── configs/
+│   │   ├── g1_config.py               # G1 人形机器人配置（29 关节）
+│   │   ├── go2_config.py              # Go2 四足机器人配置（12 关节）
+│   │   ├── g1_modality_config.py      # G1 ModalityConfig（训练用）
+│   │   └── go2_modality_config.py     # Go2 ModalityConfig（训练用）
+│   └── viz/
+│       ├── __init__.py
+│       ├── viser_viewer.py            # Viser 浏览器 3D 可视化
+│       └── mujoco_viewer.py           # MuJoCo 桌面窗口可视化
+├── tests/                             # 单元测试（116 个测试）
+│   ├── conftest.py
+│   ├── test_configs.py
+│   ├── test_quantize_safetensors.py
+│   ├── test_infer.py
+│   ├── test_collect_data.py
+│   ├── test_convert_to_lerobot.py
+│   ├── test_export_int4.py
+│   ├── test_observation_builder.py
+│   └── test_policy_client.py
+├── output/                            # 推理输出（gitignore）
+└── plan.md                            # 方案设计文档
 ```
 
-## 前置条件
+## 本地依赖
 
-- AutoDL 实例：GPU 16GB+（RTX 4090 / L40 / A100）
-- 本地：Ubuntu 22.04，Python 3.8+，无需 GPU
-- 网络：可访问 GitHub / HuggingFace（或配置镜像）
-
-## 配置说明
-
-### SSH 配置（config/ssh_config.sh）
+### 纯推理（无需 GPU）
 
 ```bash
-SSH_HOST="region-xx.autodl.pro"   # AutoDL 服务器地址
-SSH_PORT=xxxxx                     # SSH 端口
-SSH_USER="root"                    # 用户名
-SERVER_PORT=5555                   # 云端端口
-LOCAL_PORT=5555                    # 本地端口
+pip install pyzmq msgpack msgpack-numpy numpy opencv-python matplotlib pandas
 ```
 
-### 推理参数（scripts/03_local_demo_eval.sh）
+### 数据采集 + 可视化 + 量化
 
 ```bash
-DATASET_PATH="Isaac-GR00T/demo_data/droid_sample"   # 数据集路径
-EMBODIMENT_TAG="OXE_DROID_RELATIVE_EEF_RELATIVE_JOINT"  # 具身标签
-HOST="127.0.0.1"                                   # 服务器地址（隧道后）
-PORT=5555                                           # 端口
-OUTPUT_DIR="./output"                               # 输出目录
-TRAJ_IDS="1 2"                                      # 轨迹 IDs
-ACTION_HORIZON=8                                    # 动作步数
+# MuJoCo 仿真（数据采集）
+pip install mujoco glfw
+
+# Viser 浏览器可视化
+pip install viser
+
+# INT4 量化（CPU 可运行，无需 GPU）
+pip install safetensors
+
+# BitsAndBytes 量化（需要 GPU + transformers）
+pip install bitsandbytes transformers torch
+
+# 测试
+pip install pytest
 ```
+
+## 云端依赖（AutoDL）
+
+云端运行 Isaac-GR00T，依赖其 `pyproject.toml`：
+
+```bash
+# 在 Isaac-GR00T 目录下
+uv sync --python 3.10
+```
+
+## 三种可视化方案
+
+| 方案 | 技术 | 输出 | 适用场景 |
+|------|------|------|----------|
+| A: Demo 静态图 | matplotlib | JPEG + MSE/MAE | 快速验证、写报告 |
+| B: Viser 浏览器 | viser + MuJoCo | 浏览器 GUI (:20006) | 远程查看、无桌面 |
+| C: MuJoCo 原生 | mujoco.viewer | 桌面窗口 | 本地调试、最低延迟 |
+
+## 支持的机器人
+
+| 机器人 | 关节数 | 状态维度 | 动作维度 | 相机 |
+|--------|--------|----------|----------|------|
+| G1 人形 | 29 | 71 | 29 | front, wrist |
+| Go2 四足 | 12 | 37 | 12 | front, back |
+
+## 测试
+
+```bash
+# 运行全部 116 个单元测试
+pytest tests/ -v
+
+# 运行指定模块测试
+pytest tests/test_quantize_safetensors.py -v
+pytest tests/test_collect_data.py -v
+```
+
+覆盖：配置、NF4 量化、推理缓冲区、数据采集、格式转换、INT4 导出、观测构建、ZMQ 客户端。
 
 ## 常见问题
 
@@ -103,15 +221,26 @@ ACTION_HORIZON=8                                    # 动作步数
 | 模型下载慢 | 设置 `HF_ENDPOINT=https://hf-mirror.com` |
 | SSH 断连 | 使用 tmux 保持隧道，或加 `ServerAliveInterval` |
 | `ModuleNotFoundError: gr00t` | 确认 Isaac-GR00T 在同级目录，且已 `uv sync` |
+| 量化报错 OOM | 使用 `export_int4_offline.py`（CPU 友好） |
+| MuJoCo 窗口打不开 | 需要桌面环境（X11/Wayland），远程用 Viser |
+| safetensors 版本报错 | `pip install safetensors>=0.8` |
 
-## 后续阶段
+## 技术文档
 
-| 阶段 | 内容 |
+| 文档 | 说明 |
 |------|------|
-| Phase 2 | 本地 mjlab 数据采集 → 上传 AutoDL → 微调训练 |
-| Phase 3 | 模型下载 → 本地 INT4 量化 → 本地推理验证 |
-| Phase 4 | Viser 浏览器可视化 / MuJoCo 原生可视化 |
+| `plan.md` | 方案设计文档 |
+| `plan-phase2-4.md` | 详细设计文档（580 行） |
+
+## 当前状态
+
+- ✅ Demo 推理（ZMQ 客户端 + 云端 Server + SSH 隧道）
+- ✅ 数据采集 + 格式转换 + 上传脚本
+- ✅ INT4 量化（离线/在线） + 本地推理包装器
+- ✅ Viser / MuJoCo 可视化
+- ✅ 116 个单元测试全部通过
+- 📦 源码 2831 行 + 测试 4007 行
 
 ---
 
-> 📝 文档版本：v1.0 | 2026-06-28
+> 📝 文档版本：v2.1 | 2026-06-28

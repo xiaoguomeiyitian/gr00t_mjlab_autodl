@@ -7,6 +7,7 @@ Demo Plotter — 绘制 GT vs Predicted 动作对比图。
 
 import os
 from pathlib import Path
+from typing import Optional
 
 import matplotlib
 matplotlib.use("Agg")  # 无头模式

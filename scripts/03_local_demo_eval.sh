@@ -41,13 +41,10 @@ fi
 # 创建输出目录
 mkdir -p "$OUTPUT_DIR"
 
-# 设置 PYTHONPATH
-export PYTHONPATH="$SCRIPT_DIR/../Isaac-GR00T:$SCRIPT_DIR/..:$PYTHONPATH"
-
 # 执行推理
 python3 -c "
-import sys
-sys.path.insert(0, '$SCRIPT_DIR/..')
+import sys, os
+sys.path.insert(0, os.path.join('$SCRIPT_DIR', '..'))
 
 from src.demo_eval import run_demo_eval
 

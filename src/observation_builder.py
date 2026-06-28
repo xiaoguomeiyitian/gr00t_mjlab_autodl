@@ -57,21 +57,19 @@ class ObservationBuilder:
             if key in images:
                 img = images[key]
                 if img.shape[:2] != self.image_size:
-                    img = self._resize_image(img)
+                    img = self._resize_image(img, self.image_size)
                 video[key] = img
 
         # 构建观测
         obs = {
             "video": video,
             "state": state.astype(np.float32)[None, ...],  # (1, state_dim)
-            "language": {
-                "language_instruction": [[language or self.language_instruction]]
-            },
+            "language": language or self.language_instruction,
         }
         return obs
 
     @staticmethod
-    def _resize_image(img: np.ndarray) -> np.ndarray:
+    def _resize_image(img: np.ndarray, target_size: tuple = (224, 224)) -> np.ndarray:
         """OpenCV resize"""
         import cv2
-        return cv2.resize(img, (224, 224), interpolation=cv2.INTER_LINEAR)
+        return cv2.resize(img, (target_size[1], target_size[0]), interpolation=cv2.INTER_LINEAR)
