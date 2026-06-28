@@ -8,9 +8,9 @@ source "$SCRIPT_DIR/config/ssh_config.sh"
 
 # ─── 默认参数 ───
 ROBOT="${1:-g1}"
-REMOTE_DATA="/root/training_data/${ROBOT}_lerobot"
-REMOTE_MODALITY_CONFIG="/root/training_data/${ROBOT}_modality_config.py"
-REMOTE_OUTPUT="/root/checkpoints/${ROBOT}_finetune"
+REMOTE_DATA="/autodl-fs/data/gr00t_mjlab_autodl/${ROBOT}_lerobot"
+REMOTE_MODALITY_CONFIG="/autodl-fs/data/gr00t_mjlab_autodl/${ROBOT}_modality_config.py"
+REMOTE_OUTPUT="/autodl-fs/data/checkpoints/${ROBOT}_finetune"
 BASE_MODEL="${2:-nvidia/GR00T-N1.7-3B}"
 MAX_STEPS="${3:-2000}"
 NUM_GPUS="${4:-1}"

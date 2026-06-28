@@ -7,7 +7,7 @@ source "$SCRIPT_DIR/config/ssh_config.sh"
 
 # ─── 默认参数 ───
 ROBOT="${1:-g1}"
-REMOTE_MODEL="${2:-/root/checkpoints/${ROBOT}_finetune/checkpoint-${3:-2000}}"
+REMOTE_MODEL="${2:-/autodl-fs/data/checkpoints/${ROBOT}_finetune/checkpoint-${3:-2000}}"
 LOCAL_DIR="${4:-$SCRIPT_DIR/../checkpoints/${ROBOT}_finetune}"
 
 mkdir -p "$LOCAL_DIR"
@@ -21,7 +21,7 @@ echo ""
 ssh -p ${SSH_PORT} ${SSH_USER}@${SSH_HOST} "ls -la ${REMOTE_MODEL}/" || {
     echo "❌ 远端模型目录不存在: ${REMOTE_MODEL}"
     echo "   可用 checkpoint:"
-    ssh -p ${SSH_PORT} ${SSH_USER}@${SSH_HOST} "ls /root/checkpoints/${ROBOT}_finetune/ 2>/dev/null || echo '   无'"
+    ssh -p ${SSH_PORT} ${SSH_USER}@${SSH_HOST} "ls /autodl-fs/data/checkpoints/${ROBOT}_finetune/ 2>/dev/null || echo '   无'"
     exit 1
 }
 

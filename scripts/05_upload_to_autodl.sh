@@ -10,7 +10,7 @@ source "$SCRIPT_DIR/config/ssh_config.sh"
 ROBOT="${1:-g1}"
 RAW_DIR="${2:-$SCRIPT_DIR/output/${ROBOT}_raw}"
 LEROBOT_DIR="${3:-$SCRIPT_DIR/output/${ROBOT}_lerobot}"
-REMOTE_DIR="${4:-/root/training_data}"
+REMOTE_DIR="${4:-/autodl-fs/data/gr00t_mjlab_autodl}"
 MODALITY_CONFIG="${5:-$SCRIPT_DIR/src/configs/${ROBOT}_modality_config.py}"
 
 echo "📦 上传训练数据到 AutoDL"
