@@ -1,24 +1,15 @@
-__pycache__
-data
-models
-assets/cloud/Isaac-GR00T.tar.gz
-
-# Native 安装生成的虚拟环境 (./install_native.sh 创建)
+# Python
+__pycache__/
+*.pyc
 .venv/
-venv/
-.env
 
-# 临时构建产物
-*.tar.gz
-!scripts/**/*.tar.gz
-*.whl
-*.log
-/tmp/
+# 输出
+output/
+checkpoints/
 
-# 编辑器
+# IDE
 .vscode/
 .idea/
-*.swp
-.coverage
-htmlcov/
-.pytest_cache/
+
+# 敏感信息
+config/ssh_config.sh
