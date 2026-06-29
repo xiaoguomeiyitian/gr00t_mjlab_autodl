@@ -5,6 +5,13 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
+# ─── 自动检测 Python（优先 .venv）───
+if [ -f "$SCRIPT_DIR/.venv/bin/python" ]; then
+    PYTHON="$SCRIPT_DIR/.venv/bin/python"
+else
+    PYTHON="python3"
+fi
+
 # ─── 默认参数 ───
 ROBOT="${1:-g1}"
 NUM_EPISODES="${2:-50}"
@@ -22,7 +29,7 @@ echo ""
 
 cd "$SCRIPT_DIR"
 
-python3 -m src.collect_data \
+$PYTHON -m src.collect_data \
     --robot "$ROBOT" \
     --num-episodes "$NUM_EPISODES" \
     --episode-length "$EPISODE_LENGTH" \

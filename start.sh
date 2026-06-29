@@ -24,6 +24,13 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# ─── 自动检测 Python（优先 .venv）───
+if [ -f "$SCRIPT_DIR/.venv/bin/python" ]; then
+    PYTHON="$SCRIPT_DIR/.venv/bin/python"
+else
+    PYTHON="python3"
+fi
+
 # ─── 颜色 ───
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -54,6 +61,8 @@ show_menu() {
     echo -e "${CYAN}║${NC}   ${YELLOW}10)${NC} 本地 — 推理验证                                    ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}   ${MAGENTA}11)${NC} Viser + Policy Server 推理可视化                  ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}   ${MAGENTA}12)${NC} MuJoCo + Policy Server 推理可视化                ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${RED}13)${NC} 从 robot_retargeter 动作生成训练数据              ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${RED}14)${NC} 批量转换 robot_retargeter 动作                     ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}                                                          ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}   ${YELLOW}S)${NC} 查看配置                                            ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}   ${YELLOW}H)${NC} 查看帮助                                            ${CYAN}║${NC}"
@@ -68,13 +77,14 @@ ROBOT_CHOICES=("g1" "h1" "h1_with_hand" "h1_2" "h2" "go2")
 select_robot() {
     echo ""
     echo "  🤖 选择机器人:"
-    echo "    [0] G1 人形机器人 (29-DOF)"
+    echo "    [0] G1 人形机器人 (29-DOF) ← 默认"
     echo "    [1] H1 人形机器人 (20-DOF)"
     echo "    [2] H1 人形机器人 (带手, 46-DOF)"
     echo "    [3] H1.2 人形机器人 (52-DOF)"
     echo "    [4] H2 人形机器人 (32-DOF)"
     echo "    [5] Go2 四足机器人 (12-DOF)"
-    echo -n "  请选择 [0-5]: " && read ridx
+    echo -n "  请选择 [0-5] (默认 0): " && read ridx
+    ridx="${ridx:-0}"
     robot="${ROBOT_CHOICES[$ridx]:-g1}"
     echo "  → 已选择: $robot"
 }
@@ -180,7 +190,7 @@ run_viser_infer() {
     echo "   Policy Server: ${host}:${port}"
     echo "   Viser 端口: ${viser_port}"
     echo ""
-    python3 -m src.viz.viser_infer \
+    $PYTHON -m src.viz.viser_infer \
         --robot "$robot" \
         --host "$host" \
         --port "$port" \
@@ -197,12 +207,115 @@ run_mujoco_infer() {
     echo ""
     echo "   Policy Server: ${host}:${port}"
     echo ""
-    python3 -m src.viz.mujoco_infer \
+    $PYTHON -m src.viz.mujoco_infer \
         --robot "$robot" \
         --host "$host" \
         --port "$port" \
         --dataset "$DATASET_PATH" \
         --embodiment-tag "$EMBODIMENT_TAG"
+}
+
+select_motion_file() {
+    local robot="$1"
+    local -a motion_files=()
+    local idx=0
+
+    # 1. robot_retargeter 重定向后的 CSV
+    for f in "$SCRIPT_DIR/../robot_retargeter/output_data/robot_motion/"*_${robot}.csv; do
+        [ -f "$f" ] || continue
+        motion_files+=("$f")
+        idx=$((idx + 1))
+        printf "    [%d] %s (CSV)\n" "$idx" "$(basename "$f")"
+    done
+
+    # 2. robot_retargeter 重定向后的 NPZ
+    for f in "$SCRIPT_DIR/../robot_retargeter/output_data/robot_motion/"*_${robot}.npz; do
+        [ -f "$f" ] || continue
+        motion_files+=("$f")
+        idx=$((idx + 1))
+        printf "    [%d] %s (NPZ)\n" "$idx" "$(basename "$f")"
+    done
+
+    # 3. robot_retargeter export_npz 输出的 NPZ
+    for f in "$SCRIPT_DIR/../robot_retargeter/output_data/npz/"*_${robot}.npz; do
+        [ -f "$f" ] || continue
+        motion_files+=("$f")
+        idx=$((idx + 1))
+        printf "    [%d] %s (NPZ)\n" "$idx" "$(basename "$f")"
+    done
+
+    # 4. robot_retargeter 原始数据集 CSV
+    for f in "$SCRIPT_DIR/../robot_retargeter/dataset/"*/*_${robot}.csv; do
+        [ -f "$f" ] || continue
+        motion_files+=("$f")
+        idx=$((idx + 1))
+        printf "    [%d] %s (原始)\n" "$idx" "$(basename "$f")"
+    done
+    for f in "$SCRIPT_DIR/../robot_retargeter/dataset/"*/"${robot}/"*.csv; do
+        [ -f "$f" ] || continue
+        motion_files+=("$f")
+        idx=$((idx + 1))
+        printf "    [%d] %s (原始)\n" "$idx" "$(basename "$f")"
+    done
+
+    if [ ${#motion_files[@]} -eq 0 ]; then
+        echo "   ⚠️  未找到 ${robot} 的动作文件"
+        echo "   请先运行 robot_retargeter 生成动作数据:"
+        echo "   cd ../robot_retargeter && ./start.sh"
+        return 1
+    fi
+
+    echo ""
+    echo -n "   请选择 [1-$idx] (默认 1): " && read sel
+    sel="${sel:-1}"
+
+    if ! [[ "$sel" =~ ^[0-9]+$ ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt "$idx" ]; then
+        echo "   ❌ 无效选择: $sel，使用默认值 1"
+        sel=1
+    fi
+
+    # 返回选中的文件（数组索引从 0 开始）
+    MOTION_FILE_SELECTED="${motion_files[$((sel - 1))]}"
+    echo "   → 已选择: $(basename "$MOTION_FILE_SELECTED")"
+    return 0
+}
+
+run_retarget_to_lerobot() {
+    local robot="${1:-g1}"
+    local motion_file="${2:-}"
+    local output_dir="${3:-$SCRIPT_DIR/output/${robot}_from_retarget}"
+    echo -e "${GREEN}📦 从 robot_retargeter 动作生成训练数据 (${robot})...${NC}"
+    echo ""
+
+    if [ -z "$motion_file" ]; then
+        echo "   可用的动作文件:"
+        if ! select_motion_file "$robot"; then
+            return 1
+        fi
+        motion_file="$MOTION_FILE_SELECTED"
+    fi
+
+    if [ ! -f "$motion_file" ]; then
+        echo "❌ 无效的动作文件: $motion_file"
+        return 1
+    fi
+
+    echo "   动作文件: $motion_file"
+    echo "   输出: $output_dir"
+    echo ""
+    bash "$SCRIPT_DIR/scripts/10_retarget_to_lerobot.sh" "$robot" "$motion_file" "$output_dir"
+}
+
+run_batch_retarget() {
+    local robot="${1:-g1}"
+    local input_dir="${2:-$SCRIPT_DIR/../robot_retargeter/output_data/robot_motion}"
+    local output_dir="${3:-$SCRIPT_DIR/output/${robot}_all_retarget}"
+    echo -e "${GREEN}📦 批量转换 robot_retargeter 动作 (${robot})...${NC}"
+    echo ""
+    echo "   输入目录: $input_dir"
+    echo "   输出目录: $output_dir"
+    echo ""
+    bash "$SCRIPT_DIR/scripts/11_batch_retarget.sh" "$robot" "$input_dir" "$output_dir"
 }
 show_config() {
     echo -e "${YELLOW}📋 当前配置:${NC}"
@@ -235,17 +348,23 @@ show_help() {
     echo "    ./start.sh verify [robot] [vis_mode: demo|viser|mujoco]"
     echo "    ./start.sh viser-infer [robot] [host] [port] [viser_port]"
     echo "    ./start.sh mujoco-infer [robot] [host] [port]"
+    echo "    ./start.sh retarget-to-lerobot [robot] [motion_file] [output_dir]"
+    echo "    ./start.sh batch-retarget [robot] [input_dir] [output_dir]"
     echo ""
     echo "  robot 可选: g1, h1, h1_with_hand, h1_2, h2, go2"
     echo ""
     echo "  端到端示例（G1 机器人）:"
-    echo "    ./start.sh collect g1 50 300 delta"
+    echo "    # 从 robot_retargeter 动作生成训练数据"
+    echo "    ./start.sh retarget-to-lerobot g1 ../robot_retargeter/dataset/lafan1_g1/dance1_subject2.csv"
+    echo "    ./start.sh batch-retarget g1 ../robot_retargeter/dataset/lafan1_g1"
+    echo "    # 上传并训练"
     echo "    ./start.sh upload g1"
     echo "    ./start.sh train g1"
+    echo "    # 传统流程"
+    echo "    ./start.sh collect g1 50 300 delta"
     echo "    ./start.sh download g1"
     echo "    ./start.sh quantize g1"
     echo "    ./start.sh verify g1 demo"
-    echo "    ./start.sh viser g1"
     echo ""
 }
 
@@ -313,6 +432,14 @@ case "${1:-}" in
         run_mujoco_infer "$2" "$3" "$4"
         exit 0
         ;;
+    retarget-to-lerobot)
+        run_retarget_to_lerobot "$2" "$3" "$4"
+        exit 0
+        ;;
+    batch-retarget)
+        run_batch_retarget "$2" "$3" "$4"
+        exit 0
+        ;;
     help|--help|-h)
         show_help
         exit 0
@@ -322,7 +449,7 @@ esac
 # ─── 交互模式 ───
 while true; do
     show_menu
-    read -p "请选择 [0-12, S, H]: " choice
+    read -p "请选择 [0-14, S, H]: " choice
 
     case $choice in
         1) run_init ;;
@@ -342,9 +469,13 @@ while true; do
         6)
             select_robot
             echo -n "Episode 数 [50]: " && read num_ep
+            num_ep="${num_ep:-50}"
             echo -n "每步长度 [300]: " && read ep_len
+            ep_len="${ep_len:-300}"
             echo -n "动作模式 [delta]: " && read act_mode
-            run_collect "${robot}" "${num_ep:-50}" "${ep_len:-300}" "${act_mode:-delta}"
+            act_mode="${act_mode:-delta}"
+            echo "  参数: episodes=$num_ep, length=$ep_len, mode=$act_mode"
+            run_collect "${robot}" "$num_ep" "$ep_len" "$act_mode"
             ;;
         7)
             select_robot
@@ -360,23 +491,37 @@ while true; do
             ;;
         10)
             select_robot
-            echo -n "可视化 [demo/viser/mujoco]: " && read vis
-            run_verify "${robot}" "${vis:-demo}"
+            echo -n "可视化模式 [demo/viser/mujoco] (默认 demo): " && read vis
+            vis="${vis:-demo}"
+            run_verify "${robot}" "$vis"
             ;;
         11)
             get_defaults
             select_robot
-            echo -n "Policy Server 地址 [${HOST}]: " && read host
-            echo -n "Policy Server 端口 [${PORT}]: " && read port
-            echo -n "Viser 端口 [20006]: " && read viser_port
-            run_viser_infer "${robot}" "${host:-${HOST}}" "${port:-${PORT}}" "${viser_port:-20006}"
+            echo -n "Policy Server 地址 (默认 ${HOST}): " && read host
+            host="${host:-${HOST}}"
+            echo -n "Policy Server 端口 (默认 ${PORT}): " && read port
+            port="${port:-${PORT}}"
+            echo -n "Viser 端口 (默认 20006): " && read viser_port
+            viser_port="${viser_port:-20006}"
+            run_viser_infer "${robot}" "$host" "$port" "$viser_port"
             ;;
         12)
             get_defaults
             select_robot
-            echo -n "Policy Server 地址 [${HOST}]: " && read host
-            echo -n "Policy Server 端口 [${PORT}]: " && read port
-            run_mujoco_infer "${robot}" "${host:-${HOST}}" "${port:-${PORT}}"
+            echo -n "Policy Server 地址 (默认 ${HOST}): " && read host
+            host="${host:-${HOST}}"
+            echo -n "Policy Server 端口 (默认 ${PORT}): " && read port
+            port="${port:-${PORT}}"
+            run_mujoco_infer "${robot}" "$host" "$port"
+            ;;
+        13)
+            select_robot
+            run_retarget_to_lerobot "${robot}"
+            ;;
+        14)
+            select_robot
+            run_batch_retarget "${robot}"
             ;;
         [sS]) show_config ;;
         [hH]) show_help ;;
@@ -392,6 +537,4 @@ while true; do
             ;;
     esac
 
-    echo ""
-    read -p "按 Enter 继续..."
 done

@@ -5,6 +5,13 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
+# ─── 自动检测 Python（优先 .venv）───
+if [ -f "$SCRIPT_DIR/.venv/bin/python" ]; then
+    PYTHON="$SCRIPT_DIR/.venv/bin/python"
+else
+    PYTHON="python3"
+fi
+
 # ─── 默认参数 ───
 DATASET_PATH="${1:-$SCRIPT_DIR/../Isaac-GR00T/demo_data/droid_sample}"
 EMBODIMENT_TAG="${2:-OXE_DROID_RELATIVE_EEF_RELATIVE_JOINT}"
@@ -42,7 +49,7 @@ fi
 mkdir -p "$OUTPUT_DIR"
 
 # 执行推理
-python3 -c "
+$PYTHON -c "
 import sys, os
 sys.path.insert(0, os.path.join('$SCRIPT_DIR', '..'))
 

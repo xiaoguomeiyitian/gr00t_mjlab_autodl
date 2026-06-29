@@ -5,6 +5,13 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
+# ─── 自动检测 Python（优先 .venv）───
+if [ -f "$SCRIPT_DIR/.venv/bin/python" ]; then
+    PYTHON="$SCRIPT_DIR/.venv/bin/python"
+else
+    PYTHON="python3"
+fi
+
 # ─── 默认参数 ───
 ROBOT="${1:-g1}"
 MODEL_PATH="${2:-$SCRIPT_DIR/../checkpoints/${ROBOT}_int4}"
@@ -25,7 +32,7 @@ mkdir -p "$OUTPUT_DIR"
 case "$VIS_MODE" in
     demo)
         echo "📊 方案 A: Demo 静态图推理"
-        python3 -c "
+        $PYTHON -c "
 from src.infer import GR00TLocalInference
 from src.lerobot_loader import LeRobotEpisodeLoader
 from src.observation_builder import ObservationBuilder

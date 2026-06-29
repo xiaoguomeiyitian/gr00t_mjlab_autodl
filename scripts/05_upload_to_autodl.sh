@@ -4,6 +4,13 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+# ─── 自动检测 Python（优先 .venv）───
+if [ -f "$SCRIPT_DIR/.venv/bin/python" ]; then
+    PYTHON="$SCRIPT_DIR/.venv/bin/python"
+else
+    PYTHON="python3"
+fi
 source "$SCRIPT_DIR/config/ssh_config.sh"
 
 # ─── 默认参数 ───
@@ -25,7 +32,7 @@ if [ ! -d "$RAW_DIR" ]; then
 fi
 
 cd "$SCRIPT_DIR"
-python3 -m src.convert_to_lerobot \
+$PYTHON -m src.convert_to_lerobot \
     --input-dir "$RAW_DIR" \
     --output-dir "$LEROBOT_DIR" \
     --robot "$ROBOT"
