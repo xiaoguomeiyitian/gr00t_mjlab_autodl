@@ -20,7 +20,38 @@ import numpy as np
 from src.policy_client import GR00TClient
 from src.observation_builder import ObservationBuilder
 from src.lerobot_loader import LeRobotEpisodeLoader
-from src.viz.mujoco_viewer import MuJoCoViewer
+
+
+class MuJoCoViewer:
+    """轻量 MuJoCo 查看器（内联实现）。"""
+
+    def __init__(self, mjcf_path: str = "", robot: str = "g1"):
+        self.mjcf_path = mjcf_path
+        self.robot = robot
+        self.model = None
+
+    def init(self):
+        try:
+            import mujoco
+            if self.mjcf_path and Path(self.mjcf_path).exists():
+                self.model = mujoco.MjModel.from_xml_path(self.mjcf_path)
+                print(f"✅ MuJoCo 模型已加载: {self.mjcf_path}")
+            else:
+                print("⚠️  MJCF 文件不存在，仅做推理测试")
+        except ImportError:
+            print("⚠️  mujoco 未安装，仅做推理测试")
+            self.model = None
+
+    def run_passive(self, policy_fn, fps=30):
+        """简化版运行循环。"""
+        print("⚠️  MuJoCo 窗口需要桌面环境，当前仅测试推理连接")
+        # 简化：只跑几步推理测试
+        import time
+        state = None
+        for i in range(10):
+            action = policy_fn(state)
+            print(f"   Step {i}: action shape={action.shape}, range=[{action.min():.3f}, {action.max():.3f}]")
+            time.sleep(1.0 / fps)
 
 
 class MuJoCoInferLoop:

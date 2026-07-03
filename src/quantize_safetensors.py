@@ -9,7 +9,6 @@ quantize_safetensors.py — 直接 safetensors NF4 量化核心。
 """
 
 import argparse
-import os
 from pathlib import Path
 from typing import Optional
 

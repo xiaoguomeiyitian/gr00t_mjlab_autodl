@@ -15,10 +15,10 @@ NVIDIA Isaac-GR00T 的云端推理 + 本地训练编排兄弟项目。
 ## 端到端流程
 
 ```
-云端: [0] 初始化 → [1] 启动 Server → [3] 微调训练
-本地: [4] SSH 隧道 → [5] Demo 推理 → [6] 数据采集 → [7] 转换+上传
-      [8] 下载模型 → [9] INT4 量化 → [10] 推理验证
-可视化: [11] Viser + Policy Server 推理  [12] MuJoCo + Policy Server 推理
+云端: [0] 初始化 → [1] 启动 Server → [2] 微调训练
+本地: [3] SSH 隧道 → [4] 数据采集 → [5] 转换+上传
+      [6] 下载模型 → [7] INT4 量化 → [8] 推理验证
+可视化: [9] Viser + Policy Server 推理  [10] MuJoCo + Policy Server 推理
 ```
 
 ## 快速上手
@@ -36,8 +36,6 @@ NVIDIA Isaac-GR00T 的云端推理 + 本地训练编排兄弟项目。
 ./start.sh init         云端环境初始化
 ./start.sh server       云端启动 Policy Server
 ./start.sh tunnel       本地建立 SSH 隧道
-./start.sh demo         本地运行 Demo 推理
-./start.sh auto         完整流程：tunnel → demo
 
 ./start.sh collect [robot] [num_episodes] [episode_length] [action_mode]
 ./start.sh upload [robot]
@@ -45,13 +43,13 @@ NVIDIA Isaac-GR00T 的云端推理 + 本地训练编排兄弟项目。
 
 ./start.sh download [robot]
 ./start.sh quantize [robot]
-./start.sh verify [robot] [vis_mode: demo|viser|mujoco]
+./start.sh verify [robot] [vis_mode: viser|mujoco]
 
 ./start.sh viser-infer [robot] [host] [port] [viser_port]
 ./start.sh mujoco-infer [robot] [host] [port]
 ```
 
-### 2. Demo 推理
+### 2. 启动推理服务
 
 ```bash
 # 云端（AutoDL）
@@ -61,7 +59,6 @@ bash scripts/01_start_server.sh nvidia/GR00T-N1.7-3B ...    # 启动推理服务
 
 # 本地
 bash scripts/02_local_tunnel.sh                             # SSH 隧道
-bash scripts/03_local_demo_eval.sh                          # Demo 推理
 ```
 
 ### 3. 数据采集 + 训练
@@ -80,7 +77,7 @@ bash scripts/06_autodl_train.sh g1                          # 微调训练
 ```bash
 bash scripts/07_download_model.sh g1                        # 下载模型
 bash scripts/08_local_quantize.sh g1                        # INT4 量化
-bash scripts/09_local_verify.sh g1 demo                     # 推理验证
+bash scripts/09_local_verify.sh g1 viser                     # 推理验证
 ```
 
 ### 5. 推理可视化（Viser / MuJoCo）
@@ -88,8 +85,8 @@ bash scripts/09_local_verify.sh g1 demo                     # 推理验证
 ```bash
 # 交互式
 ./start.sh
-# 选择 11) Viser + Policy Server 推理可视化
-# 选择 12) MuJoCo + Policy Server 推理可视化
+# 选择 10) Viser + Policy Server 推理可视化
+# 选择 11) MuJoCo + Policy Server 推理可视化
 
 # 非交互
 ./start.sh viser-infer g1 127.0.0.1 5555 20006
@@ -109,19 +106,18 @@ gr00t_mjlab_autodl/
 │   ├── 00_autodl_init.sh              # [云端] 环境初始化
 │   ├── 01_start_server.sh             # [云端] 启动 Policy Server
 │   ├── 02_local_tunnel.sh             # [本地] SSH 隧道
-│   ├── 03_local_demo_eval.sh          # [本地] Demo 推理
 │   ├── 04_local_collect.sh            # [本地] MJLab 数据采集
 │   ├── 05_upload_to_autodl.sh         # [本地] 格式转换 + SCP 上传
 │   ├── 06_autodl_train.sh             # [云端] 微调训练
 │   ├── 07_download_model.sh           # [本地] 下载模型
 │   ├── 08_local_quantize.sh           # [本地] INT4 量化
 │   ├── 09_local_verify.sh             # [本地] 推理验证
-├── src/                               # 源码（3955 行 Python）
+│   ├── 10_retarget_to_lerobot.sh      # [本地] robot_retargeter 动作 → LeRobot v2
+│   └── 11_batch_retarget.sh           # [本地] 批量转换
+├── src/                               # 源码（5494 行 Python）
 │   ├── __init__.py
 │   ├── policy_client.py               # 纯 ZMQ 客户端（不依赖 torch）
 │   ├── observation_builder.py         # 观测格式构建
-│   ├── demo_plotter.py                # 静态图渲染
-│   ├── demo_eval.py                   # 推理主逻辑
 │   ├── lerobot_loader.py              # LeRobot 数据加载器
 │   ├── collect_data.py                # MJLab 仿真数据采集
 │   ├── convert_to_lerobot.py          # npz+mp4 → LeRobot v2 格式转换
@@ -140,11 +136,10 @@ gr00t_mjlab_autodl/
 │   │   └── h2_modality_config.py      # H2 ModalityConfig（训练用）
 │   └── viz/
 │       ├── __init__.py
-│       ├── viser_viewer.py            # Viser 浏览器 3D 可视化
-│       ├── mujoco_viewer.py           # MuJoCo 桌面窗口可视化
+
 │       ├── viser_infer.py             # Viser + Policy Server 推理可视化
 │       └── mujoco_infer.py            # MuJoCo + Policy Server 推理可视化
-├── tests/                             # 单元测试（116 个测试）
+├── tests/                             # 单元测试（142 个测试）
 │   ├── conftest.py
 │   ├── test_configs.py
 │   ├── test_quantize_safetensors.py
@@ -153,6 +148,8 @@ gr00t_mjlab_autodl/
 │   ├── test_convert_to_lerobot.py
 │   ├── test_export_int4.py
 │   ├── test_observation_builder.py
+│   ├── test_policy_client.py
+│   └── test_retarget_to_lerobot.py
 │   └── test_policy_client.py
 ├── output/                            # 推理输出（gitignore）
 └── plan.md                            # 方案设计文档
@@ -163,7 +160,7 @@ gr00t_mjlab_autodl/
 ### 纯推理（无需 GPU）
 
 ```bash
-pip install pyzmq msgpack msgpack-numpy numpy opencv-python matplotlib pandas
+pip install pyzmq msgpack msgpack-numpy numpy opencv-python pandas
 ```
 
 ### 数据采集 + 可视化 + 量化
@@ -194,14 +191,12 @@ pip install pytest
 uv sync --python 3.10
 ```
 
-## 四种可视化方案
+## 可视化方案
 
 | 方案 | 技术 | 输出 | 适用场景 |
 |------|------|------|----------|
-| A: Demo 静态图 | matplotlib | JPEG + MSE/MAE | 快速验证、写报告 |
-| B: Viser 推理可视化 | viser + Policy Server | 浏览器 GUI (:20006) | 远程查看推理动作 |
-| C: MuJoCo 推理可视化 | mujoco.viewer + Policy Server | 桌面窗口 | 本地调试推理动作 |
-| D: Viser 纯3D查看 | viser | 浏览器 GUI (:20006) | 仅查看模型（无推理） |
+| Viser 推理可视化 | viser + Policy Server | 浏览器 GUI (:20006) | 远程查看推理动作 |
+| MuJoCo 推理可视化 | mujoco.viewer + Policy Server | 桌面窗口 | 本地调试推理动作 |
 
 ## 支持的机器人
 
@@ -209,23 +204,24 @@ uv sync --python 3.10
 |--------|--------|----------|----------|------|
 | G1 人形 | 29 | 71 | 29 | front, wrist |
 | H1 人形 | 20 | 53 | 20 | front, wrist |
-| H1+Hand 人形 | 46 | 99 | 46 | front, wrist |
-| H1.2 人形 | 52 | 105 | 52 | front, wrist |
-| H2 人形 | 32 | 65 | 32 | front, wrist |
+| H1+Hand 人形 | 46 | 105 | 46 | front, wrist |
+| H1.2 人形 | 52 | 117 | 52 | front, wrist |
+| H2 人形 | 32 | 77 | 32 | front, wrist |
 | Go2 四足 | 12 | 37 | 12 | front, back |
 
 ## 测试
 
 ```bash
-# 运行全部 116 个单元测试
+# 运行全部 142 个单元测试
 pytest tests/ -v
 
 # 运行指定模块测试
 pytest tests/test_quantize_safetensors.py -v
 pytest tests/test_collect_data.py -v
+pytest tests/test_retarget_to_lerobot.py -v
 ```
 
-覆盖：配置、NF4 量化、推理缓冲区、数据采集、格式转换、INT4 导出、观测构建、ZMQ 客户端。
+覆盖：配置、NF4 量化、推理缓冲区、数据采集、格式转换、INT4 导出、观测构建、ZMQ 客户端、retarget 转换。
 
 ## 常见问题
 
@@ -244,17 +240,15 @@ pytest tests/test_collect_data.py -v
 
 | 文档 | 说明 |
 |------|------|
-| `plan.md` | 方案设计文档 |
-| `plan-phase2-4.md` | 详细设计文档（580 行） |
+| `plan-retarget-to-lerobot.md` | retarget → LeRobot 方案设计 |
 
 ## 当前状态
 
-- ✅ Demo 推理（ZMQ 客户端 + 云端 Server + SSH 隧道）
+- ✅ 云端推理（ZMQ 客户端 + 云端 Server + SSH 隧道）
 - ✅ 数据采集 + 格式转换 + 上传脚本
 - ✅ INT4 量化（离线/在线） + 本地推理包装器
 - ✅ Viser / MuJoCo 可视化
-- ✅ 116 个单元测试全部通过
-- 📦 源码 3955 行 + 测试 1176 行
+- ✅ 142 个单元测试全部通过
 
 ---
 

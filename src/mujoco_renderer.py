@@ -239,37 +239,3 @@ class MujocoRenderer:
                 camera_name=cam_name,
                 fps=fps,
             )
-
-
-def render_motion_to_video(
-    mjcf_path: str,
-    joint_pos: np.ndarray,
-    output_path: str,
-    base_pos: Optional[np.ndarray] = None,
-    base_quat: Optional[np.ndarray] = None,
-    camera_name: Optional[str] = None,
-    fps: float = 30.0,
-    image_size: tuple = (224, 224),
-):
-    """
-    便捷函数：渲染关节轨迹为视频。
-
-    Args:
-        mjcf_path: MJCF 模型路径
-        joint_pos: (T, N) 关节位置
-        output_path: 输出 mp4 路径
-        base_pos: (T, 3) 基座位置
-        base_quat: (T, 4) 基座四元数 wxyz
-        camera_name: 相机名称
-        fps: 帧率
-        image_size: 图像尺寸 (H, W)
-    """
-    renderer = MujocoRenderer(mjcf_path=mjcf_path, image_size=image_size)
-    renderer.render_motion(
-        joint_pos=joint_pos,
-        output_path=output_path,
-        base_pos=base_pos,
-        base_quat=base_quat,
-        camera_name=camera_name,
-        fps=fps,
-    )

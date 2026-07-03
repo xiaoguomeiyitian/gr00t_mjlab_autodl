@@ -1,7 +1,7 @@
 """
 collect_data.py — MJLab 仿真数据采集。
 
-支持 4 种采集策略和两种机器人（G1 / Go2）。
+支持 4 种采集策略和 6 种机器人（G1 / H1 / H1+Hand / H1.2 / H2 / Go2）。
 输出：{robot}_raw/ 目录（episode_*.npz + episode_*.mp4）
 
 用法:
@@ -10,7 +10,6 @@ collect_data.py — MJLab 仿真数据采集。
 """
 
 import argparse
-import os
 import time
 from pathlib import Path
 from typing import Optional
@@ -83,7 +82,7 @@ class DataCollector:
     ):
         """
         Args:
-            robot: 机器人类型 ("g1" 或 "go2")
+            robot: 机器人类型 (g1 / h1 / h1_with_hand / h1_2 / h2 / go2)
             task: MJLab 任务名（默认从 ROBOT_CONFIGS 取）
             action_mode: 动作模式 ("absolute" / "delta" / "relative_eef")
             num_episodes: 采集 episode 数量

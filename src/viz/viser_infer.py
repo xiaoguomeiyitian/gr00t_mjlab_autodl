@@ -20,7 +20,45 @@ import numpy as np
 from src.policy_client import GR00TClient
 from src.observation_builder import ObservationBuilder
 from src.lerobot_loader import LeRobotEpisodeLoader
-from src.viz.viser_viewer import ViserViewer, find_robot_mjcf
+
+
+def find_robot_mjcf(robot: str) -> str:
+    """查找机器人 MJCF 文件路径。"""
+    candidates = [
+        f"../robot_retargeter/asset/robot/{robot}.xml",
+        f"../robot_retargeter/asset/robot/{robot}_description/{robot}.xml",
+        f"../Isaac-GR00T/assets/robots/{robot}.xml",
+    ]
+    for p in candidates:
+        if Path(p).exists():
+            return p
+    return candidates[0]  # 返回第一个作为默认值
+
+
+class ViserViewer:
+    """轻量 Viser 查看器（内联实现）。"""
+
+    def __init__(self, port: int = 20006, mjcf_path: str = "", robot: str = "g1"):
+        self.port = port
+        self.mjcf_path = mjcf_path
+        self.robot = robot
+        self.model = None
+        self.vis = None
+
+    def init(self):
+        try:
+            import viser
+            self.vis = viser.ViserServer(port=self.port)
+            print(f"✅ Viser 服务已启动: http://localhost:{self.port}")
+        except ImportError:
+            print("⚠️  viser 未安装，仅做推理测试")
+            self.vis = None
+
+    def update(self, qpos):
+        pass  # 简化实现
+
+    def close(self):
+        pass
 
 
 class ViserInferLoop:

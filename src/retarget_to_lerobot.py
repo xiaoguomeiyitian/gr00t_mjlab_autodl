@@ -31,8 +31,6 @@ retarget_to_lerobot.py — 将 robot_retargeter 的运动数据转换为 GR00T L
 
 import argparse
 import json
-import shutil
-import time
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -61,21 +59,21 @@ ROBOT_CONFIGS = {
     },
     "h1_with_hand": {
         "num_joints": 46,
-        "state_dim": 99,
+        "state_dim": 105,
         "action_dim": 46,
         "camera_names": ["front", "wrist"],
         "mjcf_path": None,
     },
     "h1_2": {
         "num_joints": 52,
-        "state_dim": 105,
+        "state_dim": 117,
         "action_dim": 52,
         "camera_names": ["front", "wrist"],
         "mjcf_path": None,
     },
     "h2": {
         "num_joints": 32,
-        "state_dim": 65,
+        "state_dim": 77,
         "action_dim": 32,
         "camera_names": ["front", "wrist"],
         "mjcf_path": None,

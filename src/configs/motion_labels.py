@@ -100,22 +100,6 @@ def get_motion_label(filename: str, default: str = "perform the locomotion task"
     return default
 
 
-def get_all_labels() -> dict:
-    """返回所有已注册的动作标签映射（关键词 → 标签）。"""
-    return dict(LABEL_MAP)
-
-
-def add_custom_label(keyword: str, label: str) -> None:
-    """
-    添加自定义动作标签映射。
-
-    Args:
-        keyword: 关键词（匹配文件名）
-        label: 对应的语言描述
-    """
-    LABEL_MAP.insert(0, (keyword.lower(), label))  # 插入到最前面，优先级最高
-
-
 # ─── 测试 ───
 if __name__ == "__main__":
     test_files = [

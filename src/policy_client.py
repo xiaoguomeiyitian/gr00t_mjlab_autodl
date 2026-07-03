@@ -14,7 +14,6 @@ from typing import Any
 
 import msgpack
 import msgpack_numpy as mnp
-import numpy as np
 import zmq
 
 

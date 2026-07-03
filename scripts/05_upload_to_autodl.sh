@@ -1,6 +1,6 @@
 #!/bin/bash
 # ─── 上传训练数据到 AutoDL ───
-# 本地运行：转换格式 → SCP 上传
+# 本地运行：SCP 上传（格式转换已在采集步骤中完成）
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -15,32 +15,22 @@ source "$SCRIPT_DIR/config/ssh_config.sh"
 
 # ─── 默认参数 ───
 ROBOT="${1:-g1}"
-RAW_DIR="${2:-$SCRIPT_DIR/output/${ROBOT}_raw}"
-LEROBOT_DIR="${3:-$SCRIPT_DIR/output/${ROBOT}_lerobot}"
-REMOTE_DIR="${4:-/root/gr00t_mjlab_autodl}"
-MODALITY_CONFIG="${5:-$SCRIPT_DIR/src/configs/${ROBOT}_modality_config.py}"
+LEROBOT_DIR="${2:-$SCRIPT_DIR/output/${ROBOT}_lerobot}"
+REMOTE_DIR="${3:-/root/gr00t_mjlab_autodl}"
+MODALITY_CONFIG="${4:-$SCRIPT_DIR/src/configs/${ROBOT}_modality_config.py}"
 
 echo "📦 上传训练数据到 AutoDL"
 echo ""
 
-# ─── Step 1: 格式转换 ───
-echo "🔄 Step 1: 格式转换 (npz+mp4 → LeRobot v2)"
-if [ ! -d "$RAW_DIR" ]; then
-    echo "❌ 未找到原始数据: $RAW_DIR"
-    echo "   请先运行 scripts/04_local_collect.sh"
+# ─── 检查数据集目录 ───
+if [ ! -d "$LEROBOT_DIR" ]; then
+    echo "❌ 未找到 LeRobot 数据集: $LEROBOT_DIR"
+    echo "   请先运行数据采集 (选项 5) 或 retarget (选项 12/13)"
     exit 1
 fi
 
-cd "$SCRIPT_DIR"
-$PYTHON -m src.convert_to_lerobot \
-    --input-dir "$RAW_DIR" \
-    --output-dir "$LEROBOT_DIR" \
-    --robot "$ROBOT"
-
-echo ""
-
-# ─── Step 2: 上传 ───
-echo "📤 Step 2: SCP 上传到 AutoDL"
+# ─── Step 1: 上传 ───
+echo "📤 Step 1: SCP 上传到 AutoDL"
 echo "   本地: $LEROBOT_DIR"
 echo "   远端: ${SSH_USER}@${SSH_HOST}:${REMOTE_DIR}/"
 
@@ -58,21 +48,16 @@ else
     echo "   ⚠️  未找到 modality_config: $MODALITY_CONFIG"
 fi
 
-# 上传采集 metadata
-if [ -f "$RAW_DIR/collection_meta.json" ]; then
-    scp -P ${SSH_PORT} "$RAW_DIR/collection_meta.json" ${SSH_USER}@${SSH_HOST}:${REMOTE_DIR}/
-fi
-
-# ─── Step 3: 远端校验 ───
+# ─── Step 2: 远端校验 ───
 echo ""
-echo "🔍 Step 3: 远端校验"
+echo "🔍 Step 2: 远端校验"
 ssh -p ${SSH_PORT} ${SSH_USER}@${SSH_HOST} "
     echo '📁 远端目录:' && ls -la ${REMOTE_DIR}/
     echo ''
-    if [ -d '${REMOTE_DIR}/${ROBOT}_lerobot/meta' ]; then
-        echo '📋 modality.json:' && cat ${REMOTE_DIR}/${ROBOT}_lerobot/meta/modality.json
+    if [ -d '${REMOTE_DIR}/$(basename $LEROBOT_DIR)/meta' ]; then
+        echo '📋 modality.json:' && cat ${REMOTE_DIR}/$(basename $LEROBOT_DIR)/meta/modality.json
         echo ''
-        echo '📋 info.json:' && cat ${REMOTE_DIR}/${ROBOT}_lerobot/meta/info.json
+        echo '📋 info.json:' && cat ${REMOTE_DIR}/$(basename $LEROBOT_DIR)/meta/info.json
     fi
 "
 

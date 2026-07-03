@@ -17,7 +17,7 @@ import numpy as np
 from safetensors import safe_open
 from safetensors.numpy import save_file
 
-from src.quantize_safetensors import quantize_to_nf4, NF4_TABLE, BLOCK_SIZE
+from src.quantize_safetensors import quantize_to_nf4
 
 
 def export_int4_offline(

@@ -8,17 +8,17 @@
 #   ./start.sh init         云端环境初始化
 #   ./start.sh server       云端启动 Policy Server
 #   ./start.sh tunnel       本地建立 SSH 隧道
-#   ./start.sh demo         本地运行 Demo 推理
-#   ./start.sh auto         完整流程：tunnel → demo
 #   ./start.sh collect [robot] [num_episodes] [episode_length] [action_mode]
-#   ./start.sh upload [robot]
+#   ./start.sh upload [robot] [lerobot_dir]
 #   ./start.sh train [robot]
 #   ./start.sh download [robot]
 #   ./start.sh quantize [robot]
-#   ./start.sh verify [robot] [model_path] [dataset_path] [vis_mode]
-#   ./start.sh viser [robot] [port]
-#   ./start.sh mujoco [robot]
-#
+#   ./start.sh verify [robot] [vis_mode: viser|mujoco]
+#   ./start.sh viser-infer [robot] [host] [port] [viser_port]
+#   ./start.sh mujoco-infer [robot] [host] [port]
+#   ./start.sh retarget-to-lerobot [robot] [motion_file] [output_dir]
+#   ./start.sh sim-playback [robot] [motion_file] [output_dir]
+#   ./start.sh batch-retarget [robot] [input_dir] [output_dir]
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -53,15 +53,15 @@ show_menu() {
     echo -e "${CYAN}║${NC}                                                          ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}   ${CYAN}═══ 本地操作 ═══${NC}                                        ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}   ${CYAN}4)${NC} 本地 — 建立 SSH 隧道                                ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}   ${CYAN}5)${NC} 本地 — Demo 推理（需隧道）                          ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}   ${CYAN}6)${NC} 本地 — MJLab 数据采集                                ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}   ${CYAN}7)${NC} 本地 — 转换格式 + 上传到 AutoDL                     ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}   ${YELLOW}8)${NC} 本地 — 下载模型                                     ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}   ${YELLOW}9)${NC} 本地 — INT4 量化                                     ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}   ${YELLOW}10)${NC} 本地 — 推理验证                                    ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}   ${MAGENTA}11)${NC} Viser + Policy Server 推理可视化                  ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}   ${MAGENTA}12)${NC} MuJoCo + Policy Server 推理可视化                ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}   ${RED}13)${NC} 从 robot_retargeter 动作生成训练数据              ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${CYAN}5)${NC} 本地 — MJLab 数据采集 + 格式转换                    ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${CYAN}6)${NC} 本地 — 上传数据集到 AutoDL                          ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${YELLOW}7)${NC} 本地 — 下载模型                                     ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${YELLOW}8)${NC} 本地 — INT4 量化                                     ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${YELLOW}9)${NC} 本地 — 推理验证                                    ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${MAGENTA}10)${NC} Viser + Policy Server 推理可视化                  ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${MAGENTA}11)${NC} MuJoCo + Policy Server 推理可视化                ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${RED}12)${NC} 从 robot_retargeter 动作生成训练数据              ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}   ${RED}13)${NC} 仿真回放 + 采集训练数据                            ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}   ${RED}14)${NC} 批量转换 robot_retargeter 动作                     ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}                                                          ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}   ${YELLOW}S)${NC} 查看配置                                            ${CYAN}║${NC}"
@@ -122,33 +122,75 @@ run_tunnel() {
     bash "$SCRIPT_DIR/scripts/02_local_tunnel.sh"
 }
 
-run_demo() {
-    echo -e "${GREEN}🚀 运行 Demo 推理...${NC}"
-    echo ""
-    echo "   数据集: $DATASET_PATH"
-    echo "   具身: $EMBODIMENT_TAG"
-    echo "   服务器: ${HOST}:${PORT}"
-    echo "   输出: $OUTPUT_DIR"
-    echo ""
-    bash "$SCRIPT_DIR/scripts/03_local_demo_eval.sh" "$DATASET_PATH" "$EMBODIMENT_TAG" "$HOST" "$PORT" "$OUTPUT_DIR"
-}
-
 run_collect() {
     local robot="${1:-g1}"
     local num_episodes="${2:-50}"
     local episode_length="${3:-300}"
     local action_mode="${4:-delta}"
     local output_dir="${5:-$SCRIPT_DIR/output/${robot}_raw}"
-    echo -e "${GREEN}🤖 数据采集 (${robot})...${NC}"
+    local lerobot_dir="$SCRIPT_DIR/output/${robot}_lerobot"
+    echo -e "${GREEN}🤖 数据采集 + 格式转换 (${robot})...${NC}"
     echo ""
     bash "$SCRIPT_DIR/scripts/04_local_collect.sh" "$robot" "$num_episodes" "$episode_length" "$action_mode" "$output_dir"
+
+    echo ""
+    echo -e "${CYAN}🔄 自动转换为 LeRobot v2 格式...${NC}"
+    echo "   输入: $output_dir"
+    echo "   输出: $lerobot_dir"
+    echo ""
+    $PYTHON -m src.convert_to_lerobot \
+        --input-dir "$output_dir" \
+        --output-dir "$lerobot_dir" \
+        --robot "$robot"
+    echo ""
+    echo "✅ 采集 + 转换完成: $lerobot_dir"
+}
+
+select_lerobot_dir() {
+    local robot="$1"
+    local -a dirs=()
+    local idx=0
+
+    # 扫描 output/ 下所有 *_lerobot 目录
+    for d in "$SCRIPT_DIR/output/"*_lerobot "$SCRIPT_DIR/output/"*_from_retarget "$SCRIPT_DIR/output/"*_all_retarget; do
+        [ -d "$d" ] || continue
+        dirs+=("$d")
+        idx=$((idx + 1))
+        printf "    [%d] %s\n" "$idx" "$(basename "$d")"
+    done
+
+    if [ ${#dirs[@]} -eq 0 ]; then
+        echo "   ⚠️  未找到 LeRobot 数据集目录"
+        echo "   请先运行数据采集 (选项 5) 或 retarget (选项 12/13)"
+        return 1
+    fi
+
+    echo ""
+    echo -n "   请选择要上传的目录 [1-$idx] (默认 1): " && read sel
+    sel="${sel:-1}"
+
+    if ! [[ "$sel" =~ ^[0-9]+$ ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt "$idx" ]; then
+        echo "   ❌ 无效选择: $sel，使用默认值 1"
+        sel=1
+    fi
+
+    LEROBOT_DIR_SELECTED="${dirs[$((sel - 1))]}"
+    echo "   → 已选择: $(basename "$LEROBOT_DIR_SELECTED")"
+    return 0
 }
 
 run_upload() {
     local robot="${1:-g1}"
-    echo -e "${GREEN}📤 转换格式 + 上传到 AutoDL (${robot})...${NC}"
+    echo -e "${GREEN}� 上传数据集到 AutoDL...${NC}"
     echo ""
-    bash "$SCRIPT_DIR/scripts/05_upload_to_autodl.sh" "$robot"
+
+    if ! select_lerobot_dir "$robot"; then
+        return 1
+    fi
+
+    local lerobot_dir="$LEROBOT_DIR_SELECTED"
+    echo ""
+    bash "$SCRIPT_DIR/scripts/05_upload_to_autodl.sh" "$robot" "" "$lerobot_dir"
 }
 
 run_train() {
@@ -174,7 +216,7 @@ run_quantize() {
 
 run_verify() {
     local robot="${1:-g1}"
-    local vis_mode="${2:-demo}"
+    local vis_mode="${2:-viser}"
     echo -e "${GREEN}🔍 本地推理验证 (${robot}, ${vis_mode})...${NC}"
     echo ""
     bash "$SCRIPT_DIR/scripts/09_local_verify.sh" "$robot" "" "" "" "$vis_mode"
@@ -306,6 +348,37 @@ run_retarget_to_lerobot() {
     bash "$SCRIPT_DIR/scripts/10_retarget_to_lerobot.sh" "$robot" "$motion_file" "$output_dir"
 }
 
+run_sim_playback() {
+    local robot="${1:-g1}"
+    local motion_file="${2:-}"
+    local output_dir="${3:-$SCRIPT_DIR/output/${robot}_sim_raw}"
+    echo -e "${GREEN}🎮 仿真回放 + 采集训练数据 (${robot})...${NC}"
+    echo ""
+
+    if [ -z "$motion_file" ]; then
+        echo "   可用的动作文件:"
+        if ! select_motion_file "$robot"; then
+            return 1
+        fi
+        motion_file="$MOTION_FILE_SELECTED"
+    fi
+
+    if [ ! -f "$motion_file" ]; then
+        echo "❌ 无效的动作文件: $motion_file"
+        return 1
+    fi
+
+    echo "   动作文件: $motion_file"
+    echo "   输出: $output_dir"
+    echo ""
+    $PYTHON -m src.sim_playback \
+        --motion "$motion_file" \
+        --robot "$robot" \
+        --output "$output_dir" \
+        --num-episodes 5 \
+        --episode-length 300
+}
+
 run_batch_retarget() {
     local robot="${1:-g1}"
     local input_dir="${2:-$SCRIPT_DIR/../robot_retargeter/output_data/robot_motion}"
@@ -338,17 +411,16 @@ show_help() {
     echo "    ./start.sh init         云端环境初始化"
     echo "    ./start.sh server       云端启动 Policy Server"
     echo "    ./start.sh tunnel       本地建立 SSH 隧道"
-    echo "    ./start.sh demo         本地运行 Demo 推理"
-    echo "    ./start.sh auto         完整流程：tunnel → demo"
     echo "    ./start.sh collect [robot] [num_episodes] [episode_length] [action_mode]"
-    echo "    ./start.sh upload [robot]"
+    echo "    ./start.sh upload [robot] [lerobot_dir]"
     echo "    ./start.sh train [robot]"
     echo "    ./start.sh download [robot]"
     echo "    ./start.sh quantize [robot]"
-    echo "    ./start.sh verify [robot] [vis_mode: demo|viser|mujoco]"
+    echo "    ./start.sh verify [robot] [vis_mode: viser|mujoco]"
     echo "    ./start.sh viser-infer [robot] [host] [port] [viser_port]"
     echo "    ./start.sh mujoco-infer [robot] [host] [port]"
     echo "    ./start.sh retarget-to-lerobot [robot] [motion_file] [output_dir]"
+    echo "    ./start.sh sim-playback [robot] [motion_file] [output_dir]"
     echo "    ./start.sh batch-retarget [robot] [input_dir] [output_dir]"
     echo ""
     echo "  robot 可选: g1, h1, h1_with_hand, h1_2, h2, go2"
@@ -356,15 +428,17 @@ show_help() {
     echo "  端到端示例（G1 机器人）:"
     echo "    # 从 robot_retargeter 动作生成训练数据"
     echo "    ./start.sh retarget-to-lerobot g1 ../robot_retargeter/dataset/lafan1_g1/dance1_subject2.csv"
+    echo "    ./start.sh sim-playback g1 ../robot_retargeter/dataset/lafan1_g1/dance1_subject2.csv"
     echo "    ./start.sh batch-retarget g1 ../robot_retargeter/dataset/lafan1_g1"
     echo "    # 上传并训练"
     echo "    ./start.sh upload g1"
     echo "    ./start.sh train g1"
     echo "    # 传统流程"
-    echo "    ./start.sh collect g1 50 300 delta"
+    echo "    ./start.sh collect g1 50 300 delta    # 采集 + 自动转换"
+    echo "    ./start.sh upload g1                   # 选择目录后上传"
     echo "    ./start.sh download g1"
     echo "    ./start.sh quantize g1"
-    echo "    ./start.sh verify g1 demo"
+    echo "    ./start.sh verify g1 viser"
     echo ""
 }
 
@@ -383,19 +457,6 @@ case "${1:-}" in
     tunnel)
         get_defaults
         run_tunnel
-        exit 0
-        ;;
-    demo)
-        get_defaults
-        run_demo
-        exit 0
-        ;;
-    auto)
-        get_defaults
-        echo -e "${CYAN}🎯 非交互模式：tunnel → demo${NC}"
-        echo ""
-        run_tunnel
-        run_demo
         exit 0
         ;;
     collect)
@@ -440,6 +501,10 @@ case "${1:-}" in
         run_batch_retarget "$2" "$3" "$4"
         exit 0
         ;;
+    sim-playback)
+        run_sim_playback "$2" "$3" "$4"
+        exit 0
+        ;;
     help|--help|-h)
         show_help
         exit 0
@@ -463,10 +528,6 @@ while true; do
             ;;
         4) run_tunnel ;;
         5)
-            get_defaults
-            run_demo
-            ;;
-        6)
             select_robot
             echo -n "Episode 数 [50]: " && read num_ep
             num_ep="${num_ep:-50}"
@@ -477,25 +538,25 @@ while true; do
             echo "  参数: episodes=$num_ep, length=$ep_len, mode=$act_mode"
             run_collect "${robot}" "$num_ep" "$ep_len" "$act_mode"
             ;;
-        7)
+        6)
             select_robot
             run_upload "${robot}"
             ;;
-        8)
+        7)
             select_robot
             run_download "${robot}"
             ;;
-        9)
+        8)
             select_robot
             run_quantize "${robot}"
             ;;
-        10)
+        9)
             select_robot
-            echo -n "可视化模式 [demo/viser/mujoco] (默认 demo): " && read vis
-            vis="${vis:-demo}"
+            echo -n "可视化模式 [viser/mujoco] (默认 viser): " && read vis
+            vis="${vis:-viser}"
             run_verify "${robot}" "$vis"
             ;;
-        11)
+        10)
             get_defaults
             select_robot
             echo -n "Policy Server 地址 (默认 ${HOST}): " && read host
@@ -506,7 +567,7 @@ while true; do
             viser_port="${viser_port:-20006}"
             run_viser_infer "${robot}" "$host" "$port" "$viser_port"
             ;;
-        12)
+        11)
             get_defaults
             select_robot
             echo -n "Policy Server 地址 (默认 ${HOST}): " && read host
@@ -515,9 +576,13 @@ while true; do
             port="${port:-${PORT}}"
             run_mujoco_infer "${robot}" "$host" "$port"
             ;;
-        13)
+        12)
             select_robot
             run_retarget_to_lerobot "${robot}"
+            ;;
+        13)
+            select_robot
+            run_sim_playback "${robot}"
             ;;
         14)
             select_robot
