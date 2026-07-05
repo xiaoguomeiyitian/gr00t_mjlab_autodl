@@ -68,9 +68,12 @@ def _reorder_slices(state_keys: list, local_slices: dict) -> dict:
 
 
 class ViserViewer:
-    """Viser 3D 查看器：用 mujoco 加载 MJCF，用 viser 渲染机器人 mesh。
+    """Viser 3D 查看器：借鉴 robot_retargeter 的 multi_robot_visualize_viser.py 设计。
 
-    每步根据 qpos 做 forward kinematics，更新每个 body 的位姿。
+    - set_up_direction("+z") + configure_default_lights + add_grid 地面网格
+    - add_batched_meshes_simple 批量渲染（高效）
+    - 用 mujoco FK 后的 geom_xpos/geom_xmat 更新位姿
+    - GUI: 暂停/重播/帧滑块/速度
     """
 
     def __init__(self, port: int = 20006, mjcf_path: str = "", robot: str = "g1"):
@@ -80,91 +83,91 @@ class ViserViewer:
         self.model = None       # mujoco MjModel
         self.data = None        # mujoco MjData
         self.vis = None         # viser.ViserServer
-        self._mesh_handles = []  # viser MeshHandle 列表（按 geom 顺序）
-        self._geom_body_ids = []  # 每个 geom 对应的 body id
-        self._qpos_addr = None   # 铰接关节 qpos 起始地址（跳过 floating base）
+        self._batched_handles = []  # list[(handle, [geom_idx, ...])]
+        self._qpos_addr = 0     # 铰接关节 qpos 起始地址（跳过 floating base）
+        # 播放状态
+        self.paused = False
+        self.fps = 30
 
     def init(self):
         try:
             import viser
-            import trimesh
             import mujoco
         except ImportError as e:
             print(f"⚠️  依赖未安装: {e}，仅做推理测试")
             self.vis = None
             return
 
+        # 启动 Viser（即使无模型也启动，便于浏览器查看）
+        self.vis = viser.ViserServer(port=self.port, verbose=False)
+        self.vis.scene.set_up_direction("+z")
+        self.vis.scene.configure_default_lights(enabled=True)
+        # 灰色地面网格（与 robot_retargeter 一致）
+        self.vis.scene.add_grid(
+            "ground",
+            width=20, height=20,
+            cell_size=1.0, cell_thickness=0.5, cell_color=(80, 80, 80),
+            section_thickness=0.8, section_color=(50, 50, 50),
+            position=(0, 0, -0.01), wxyz=(1, 0, 0, 0),
+        )
+        print(f"✅ Viser 服务已启动: http://localhost:{self.port}")
+
         # 加载 MJCF
         if not self.mjcf_path or not Path(self.mjcf_path).exists():
-            print(f"⚠️  MJCF 文件不存在: {self.mjcf_path}，仅做推理测试")
-            self.vis = viser.ViserServer(port=self.port)
-            print(f"✅ Viser 服务已启动（无模型）: http://localhost:{self.port}")
+            print(f"⚠️  MJCF 文件不存在: {self.mjcf_path}（仅显示地面网格）")
             return
 
         self.model = mujoco.MjModel.from_xml_path(self.mjcf_path)
         self.data = mujoco.MjData(self.model)
         mujoco.mj_forward(self.model, self.data)
-
-        # 启动 Viser
-        self.vis = viser.ViserServer(port=self.port)
-        print(f"✅ Viser 服务已启动: http://localhost:{self.port}")
         print(f"   MJCF: {self.mjcf_path} (nq={self.model.nq}, nbody={self.model.nbody})")
 
         # 找到铰接关节 qpos 起始地址（跳过 floating base 的 7 维）
         self._qpos_addr = 7 if self.model.jnt_type[0] == mujoco.mjtJoint.mjJNT_FREE else 0
 
-        # 为每个 geom 创建 viser mesh
-        # mesh_vertnum[i] / mesh_facenum[i] 是第 i 个 mesh 的顶点/面数量，需累计求偏移
-        vert_offsets = np.cumsum(np.concatenate([[0], self.model.mesh_vertnum]))
-        face_offsets = np.cumsum(np.concatenate([[0], self.model.mesh_facenum]))
-
+        # 按 mesh_id 分组 geom，用 add_batched_meshes_simple 批量渲染
+        # mesh_vertadr/mesh_faceadr 是起始地址，mesh_vertnum/mesh_facenum 是数量
+        mesh_groups: dict = {}  # mesh_id -> [geom_idx, ...]
         for i in range(self.model.ngeom):
-            gtype = self.model.geom_type[i]
-            body_id = self.model.geom_bodyid[i]
-            self._geom_body_ids.append(body_id)
-
-            if gtype == 7:  # mjGEOM_MESH
-                mesh_id = self.model.geom_dataid[i]
-                if mesh_id < 0:
-                    continue
-                vstart = vert_offsets[mesh_id]
-                vcount = self.model.mesh_vertnum[mesh_id]
-                fstart = face_offsets[mesh_id]
-                fcount = self.model.mesh_facenum[mesh_id]
-                verts = np.asarray(self.model.mesh_vert[vstart:vstart + vcount], dtype=np.float32)
-                faces = np.asarray(self.model.mesh_face[fstart:fstart + fcount], dtype=np.uint32)
-                # geom 局部偏移
-                verts = verts + self.model.geom_pos[i]
-                mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
-            elif gtype == 2:  # mjGEOM_SPHERE
-                r = float(self.model.geom_size[i][0])
-                mesh = trimesh.creation.icosphere(subdivisions=2, radius=r)
-                mesh.apply_translation(self.model.geom_pos[i])
-            elif gtype == 3:  # mjGEOM_CAPSULE
-                r, half_len = float(self.model.geom_size[i][0]), float(self.model.geom_size[i][1])
-                mesh = trimesh.creation.capsule(radius=r, height=2 * half_len)
-                mesh.apply_translation(self.model.geom_pos[i])
-            elif gtype == 6:  # mjGEOM_BOX
-                size = self.model.geom_size[i]
-                mesh = trimesh.creation.box(extents=2 * size)
-                mesh.apply_translation(self.model.geom_pos[i])
-            else:
+            gtype = int(self.model.geom_type[i])
+            if gtype != int(mujoco.mjtGeom.mjGEOM_MESH):
+                continue  # 只渲染 mesh 类型 geom（与 robot_retargeter --all-geoms=False 一致）
+            mesh_id = int(self.model.geom_dataid[i])
+            if mesh_id < 0:
                 continue
+            mesh_groups.setdefault(mesh_id, []).append(i)
 
-            # 用 body 的世界位姿初始化
-            xpos = self.data.xpos[body_id]
-            xquat = self.data.xquat[body_id]
-            handle = self.vis.scene.add_mesh_simple(
-                name=f"geom_{i}",
-                vertices=np.asarray(mesh.vertices, dtype=np.float32),
-                faces=np.asarray(mesh.faces, dtype=np.uint32),
-                position=xpos,
-                wxyz=xquat,
-                color=np.array([0.7, 0.7, 0.75]),
+        for mesh_id, geom_ids in mesh_groups.items():
+            if mesh_id >= self.model.nmesh:
+                continue
+            vert_adr = int(self.model.mesh_vertadr[mesh_id])
+            vert_num = int(self.model.mesh_vertnum[mesh_id])
+            face_adr = int(self.model.mesh_faceadr[mesh_id])
+            face_num = int(self.model.mesh_facenum[mesh_id])
+            if vert_num <= 0 or face_num <= 0:
+                continue
+            vertices = np.asarray(self.model.mesh_vert[vert_adr:vert_adr + vert_num], dtype=np.float32)
+            faces = np.asarray(self.model.mesh_face[face_adr:face_adr + face_num], dtype=np.uint32)
+
+            n_inst = len(geom_ids)
+            positions = np.zeros((n_inst, 3), dtype=np.float32)
+            wxyzs = np.tile([1, 0, 0, 0], (n_inst, 1)).astype(np.float32)
+            # 用初始 geom_xpos/geom_xmat 填充
+            for j, gid in enumerate(geom_ids):
+                positions[j] = self.data.geom_xpos[gid]
+                wxyzs[j] = _rotmat_to_wxyz(self.data.geom_xmat[gid])
+
+            handle = self.vis.scene.add_batched_meshes_simple(
+                name=f"robot/mesh_{mesh_id}",
+                vertices=vertices,
+                faces=faces,
+                batched_wxyzs=wxyzs,
+                batched_positions=positions,
+                batched_colors=(180, 180, 180),
             )
-            self._mesh_handles.append(handle)
+            self._batched_handles.append((handle, geom_ids))
 
-        print(f"   已渲染 {len(self._mesh_handles)} 个 mesh")
+        print(f"   已渲染 {len(self._batched_handles)} 个 mesh 组 ({sum(len(g) for _, g in self._batched_handles)} 个 geom)")
 
     def update(self, qpos):
         """根据关节角度更新机器人姿态。
@@ -182,14 +185,20 @@ class ViserViewer:
             self.data.qpos[self._qpos_addr:] = qpos[:n_artic]
         else:
             self.data.qpos[self._qpos_addr:self._qpos_addr + len(qpos)] = qpos
-        mujoco.mj_kinematics(self.model, self.data)
-        mujoco.mj_comPos(self.model, self.data)
+        mujoco.mj_forward(self.model, self.data)
 
-        # 更新每个 mesh 的位姿
-        for i, handle in enumerate(self._mesh_handles):
-            body_id = self._geom_body_ids[i]
-            handle.position = self.data.xpos[body_id]
-            handle.wxyz = self.data.xquat[body_id]
+        # 用 geom_xpos/geom_xmat 更新每个 batched mesh 的位姿
+        all_pos = self.data.geom_xpos
+        all_mat = self.data.geom_xmat
+        for handle, geom_ids in self._batched_handles:
+            n_inst = len(geom_ids)
+            pos = np.zeros((n_inst, 3), dtype=np.float32)
+            wxyz = np.tile([1, 0, 0, 0], (n_inst, 1)).astype(np.float32)
+            for j, gid in enumerate(geom_ids):
+                pos[j] = all_pos[gid]
+                wxyz[j] = _rotmat_to_wxyz(all_mat[gid])
+            handle.batched_positions = pos
+            handle.batched_wxyzs = wxyz
 
     def close(self):
         if self.vis is not None:
@@ -197,6 +206,24 @@ class ViserViewer:
                 self.vis.stop()
             except Exception:
                 pass
+
+
+def _rotmat_to_wxyz(mat: np.ndarray) -> np.ndarray:
+    """3x3 旋转矩阵（展平）→ wxyz 四元数。借鉴 robot_retargeter 的实现。"""
+    m = mat.flatten()
+    trace = m[0] + m[4] + m[8]
+    if trace > 0:
+        s = 0.5 / np.sqrt(trace + 1.0)
+        return np.array([0.25 / s, (m[7] - m[5]) * s, (m[2] - m[6]) * s, (m[3] - m[1]) * s])
+    elif m[0] > m[4] and m[0] > m[8]:
+        s = 2.0 * np.sqrt(1.0 + m[0] - m[4] - m[8])
+        return np.array([(m[7] - m[5]) / s, 0.25 * s, (m[1] + m[3]) / s, (m[2] + m[6]) / s])
+    elif m[4] > m[8]:
+        s = 2.0 * np.sqrt(1.0 + m[4] - m[0] - m[8])
+        return np.array([(m[2] - m[6]) / s, (m[1] + m[3]) / s, 0.25 * s, (m[5] + m[7]) / s])
+    else:
+        s = 2.0 * np.sqrt(1.0 + m[8] - m[0] - m[4])
+        return np.array([(m[3] - m[1]) / s, (m[2] + m[6]) / s, (m[5] + m[7]) / s, 0.25 * s])
 
 
 class ViserInferLoop:
