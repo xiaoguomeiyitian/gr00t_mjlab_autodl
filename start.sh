@@ -208,6 +208,27 @@ run_verify() {
     bash "$SCRIPT_DIR/scripts/09_local_verify.sh" "$robot" "" "" "" "$vis_mode"
 }
 
+run_eval() {
+    # 开环评估：用 LeRobotEpisodeLoader + ObservationBuilder + GR00TClient
+    # 对比预测动作与 GT 动作的 MSE/MAE，验证数据链路与观测格式
+    local robot="${1:-g1}"
+    local dataset="${2:-$SCRIPT_DIR/output/${robot}_lerobot}"
+    local host="${3:-127.0.0.1}"
+    local port="${4:-5555}"
+    local traj_ids="${5:-0}"
+    echo -e "${GREEN}🧪 开环评估 (${robot})...${NC}"
+    echo "   数据集: $dataset"
+    echo "   Server: $host:$port"
+    echo "   traj_ids: $traj_ids"
+    echo ""
+    cd "$SCRIPT_DIR"
+    $PYTHON -m src.open_loop_eval \
+        --dataset "$dataset" --robot "$robot" \
+        --host "$host" --port "$port" \
+        --traj-ids $traj_ids \
+        --action-horizon 16
+}
+
 run_viser_infer() {
     local robot="${1:-g1}"
     local host="${2:-127.0.0.1}"
@@ -331,6 +352,11 @@ case "${1:-}" in
         ;;
     verify)
         run_verify "$2" "$3"
+        exit 0
+        ;;
+    eval)
+        # 开环评估：./start.sh eval [robot] [dataset] [host] [port] [traj_ids]
+        run_eval "$2" "$3" "$4" "$5" "$6"
         exit 0
         ;;
     viser-infer)

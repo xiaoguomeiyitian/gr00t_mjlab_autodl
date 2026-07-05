@@ -91,19 +91,50 @@ class MuJoCoInferLoop:
 
         # 获取 modality config
         modality_config = self.client.get_modality_config()
-        # modality_config 反序列化后是嵌套 dict，相机名在 ["video"]["modality_keys"]
-        video_keys = ["exterior_image_1_left"]
+        video_keys = ["front", "wrist"]
+        state_keys = []
+        language_key = "annotation.human.task_description"
+        num_obs_steps = 1
         if isinstance(modality_config, dict):
             video_cfg = modality_config.get("video", {})
+            state_cfg = modality_config.get("state", {})
+            lang_cfg = modality_config.get("language", {})
             if isinstance(video_cfg, dict):
                 mk = video_cfg.get("modality_keys")
                 if isinstance(mk, list) and mk:
                     video_keys = mk
-            else:
-                mk = getattr(video_cfg, "modality_keys", None)
-                if mk:
-                    video_keys = list(mk)
-        self.obs_builder = ObservationBuilder(camera_keys=video_keys)
+                di = video_cfg.get("delta_indices")
+                if isinstance(di, list) and di:
+                    num_obs_steps = len(di)
+            if isinstance(state_cfg, dict):
+                mk = state_cfg.get("modality_keys")
+                if isinstance(mk, list) and mk:
+                    state_keys = mk
+            if isinstance(lang_cfg, dict):
+                mk = lang_cfg.get("modality_keys")
+                if isinstance(mk, list) and mk:
+                    language_key = mk[0]
+        else:
+            video_keys = list(getattr(modality_config.get("video"), "modality_keys", video_keys) or video_keys)
+            state_keys = list(getattr(modality_config.get("state"), "modality_keys", []) or [])
+            lang_mks = getattr(modality_config.get("language"), "modality_keys", None)
+            if lang_mks:
+                language_key = lang_mks[0]
+
+        # state_slices：优先用机器人配置，回退到按服务端 state_keys 重排
+        from src.observation_builder import state_slices_from_config
+        state_slices = state_slices_from_config(self.robot)
+        if state_keys and list(state_slices.keys()) != state_keys:
+            from src.viz.viser_infer import _reorder_slices
+            state_slices = _reorder_slices(state_keys, state_slices)
+
+        self.obs_builder = ObservationBuilder(
+            camera_keys=video_keys,
+            state_dim=sum(e - s for s, e in state_slices.values()),
+            state_slices=state_slices,
+            language_key=language_key,
+            num_obs_steps=num_obs_steps,
+        )
 
         # 加载数据集（如果提供）
         if self.dataset_path and Path(self.dataset_path).exists():

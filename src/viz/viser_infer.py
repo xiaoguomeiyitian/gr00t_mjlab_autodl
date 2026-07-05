@@ -34,6 +34,26 @@ def find_robot_mjcf(robot: str) -> str:
     return candidates[0]  # 返回第一个作为默认值
 
 
+def _reorder_slices(state_keys: list, local_slices: dict) -> dict:
+    """按服务端 state_keys 顺序重新计算连续切片。
+
+    假设 state 仍是按 state_keys 顺序连续拼接的向量。
+    用 local_slices 中各 key 的长度推导新切片。
+    """
+    # 先从 local_slices 推导每个 key 的长度
+    lengths = {k: (e - s) for k, (s, e) in local_slices.items()}
+    reordered = {}
+    offset = 0
+    for k in state_keys:
+        d = lengths.get(k, 0)
+        if d == 0:
+            # 未知 key，跳过（后续 ObservationBuilder 会零填充告警）
+            continue
+        reordered[k] = (offset, offset + d)
+        offset += d
+    return reordered
+
+
 class ViserViewer:
     """轻量 Viser 查看器（内联实现）。"""
 
@@ -105,20 +125,52 @@ class ViserInferLoop:
         modality_config = self.client.get_modality_config()
         # modality_config 反序列化后是嵌套 dict：
         #   {"video": {"delta_indices": [...], "modality_keys": ["front","wrist"], ...}, ...}
-        # 相机名在 modality_config["video"]["modality_keys"]，不是顶层 .keys()
-        video_keys = ["exterior_image_1_left"]
+        video_keys = ["front", "wrist"]
+        state_keys = []
+        language_key = "annotation.human.task_description"
+        num_obs_steps = 1
         if isinstance(modality_config, dict):
             video_cfg = modality_config.get("video", {})
+            state_cfg = modality_config.get("state", {})
+            lang_cfg = modality_config.get("language", {})
             if isinstance(video_cfg, dict):
                 mk = video_cfg.get("modality_keys")
                 if isinstance(mk, list) and mk:
                     video_keys = mk
-            else:
-                # 兼容 ModalityConfig 对象（本地直连场景）
-                mk = getattr(video_cfg, "modality_keys", None)
-                if mk:
-                    video_keys = list(mk)
-        self.obs_builder = ObservationBuilder(camera_keys=video_keys)
+                di = video_cfg.get("delta_indices")
+                if isinstance(di, list) and di:
+                    num_obs_steps = len(di)
+            if isinstance(state_cfg, dict):
+                mk = state_cfg.get("modality_keys")
+                if isinstance(mk, list) and mk:
+                    state_keys = mk
+            if isinstance(lang_cfg, dict):
+                mk = lang_cfg.get("modality_keys")
+                if isinstance(mk, list) and mk:
+                    language_key = mk[0]
+        else:
+            # 兼容 ModalityConfig 对象（本地直连场景）
+            video_keys = list(getattr(modality_config.get("video"), "modality_keys", video_keys) or video_keys)
+            state_keys = list(getattr(modality_config.get("state"), "modality_keys", []) or [])
+            lang_mks = getattr(modality_config.get("language"), "modality_keys", None)
+            if lang_mks:
+                language_key = lang_mks[0]
+
+        # state_slices：优先用机器人配置（与 modality.json 对齐），回退到单键
+        from src.observation_builder import state_slices_from_config
+        state_slices = state_slices_from_config(self.robot)
+        # 若服务端返回的 state_keys 与本地切片不一致，以服务端为准并按顺序重排
+        if state_keys and list(state_slices.keys()) != state_keys:
+            # 按服务端 state_keys 顺序重新计算切片（假设仍是连续拼接）
+            state_slices = _reorder_slices(state_keys, state_slices)
+
+        self.obs_builder = ObservationBuilder(
+            camera_keys=video_keys,
+            state_dim=sum(e - s for s, e in state_slices.values()),
+            state_slices=state_slices,
+            language_key=language_key,
+            num_obs_steps=num_obs_steps,
+        )
 
         # 加载数据集（如果提供）
         if self.dataset_path and Path(self.dataset_path).exists():

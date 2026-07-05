@@ -84,13 +84,14 @@ def convert_to_lerobot(
     with open(meta_dir / "modality.json", "w") as f:
         json.dump(modality, f, indent=2)
 
+    # tasks.jsonl：字段名必须是 "task"（与 LeRobot v2 / GR00T 一致），不是 "task_description"
     with open(meta_dir / "tasks.jsonl", "w") as f:
-        f.write(json.dumps({"task_index": 0, "task_description": task_description}) + "\n")
+        f.write(json.dumps({"task_index": 0, "task": task_description}) + "\n")
 
     all_rows = []
     episodes_info = []
     video_count = 0
-    parquet_idx = 0
+    parquet_idx = 0  # 全局帧索引，跨 episode 连续递增
 
     for ep_idx, npz_file in enumerate(npz_files):
         data = np.load(str(npz_file))
@@ -99,14 +100,22 @@ def convert_to_lerobot(
         rewards = data.get("rewards", np.zeros(len(states)))
         ep_steps = len(states)
 
-        episodes_info.append({"episode_index": ep_idx, "length": ep_steps, "task_index": 0})
+        # episodes.jsonl：tasks 字段是任务描述列表（与 LeRobot v2 一致）
+        episodes_info.append({
+            "episode_index": ep_idx,
+            "tasks": [task_description],
+            "length": ep_steps,
+        })
 
         # 按 episode 索引显式查找 mp4，避免 sorted 索引错配
         ep_mp4s = mp4_by_ep.get(ep_idx, [])
-        # 优先匹配带相机后缀的；若无则用单文件
+        # 视频目录结构：videos/chunk-000/observation.images.<cam>/episode_000000.mp4
+        # 与 LeRobot v2 / GR00T 官方一致（modality.json 的 original_key 指向此路径）
         for cam in camera_names:
-            video_name = f"episode_{ep_idx:06d}_{cam}.mp4"
-            target = videos_dir / video_name
+            cam_video_dir = videos_dir / f"observation.images.{cam}"
+            cam_video_dir.mkdir(parents=True, exist_ok=True)
+            video_name = f"episode_{ep_idx:06d}.mp4"
+            target = cam_video_dir / video_name
             # 找匹配该相机的 mp4
             cam_mp4 = next((m for m in ep_mp4s if m.stem.endswith(f"_{cam}")), None)
             if cam_mp4 and cam_mp4.exists():
@@ -123,42 +132,60 @@ def convert_to_lerobot(
             else:
                 _create_placeholder_video(str(target), ep_steps, fps, camera_names)
 
+        # 每个 episode 单独一个 parquet（与 LeRobot v2 一致）
+        ep_rows = []
         for step in range(ep_steps):
             row = {
                 "observation.state": states[step].tolist(),
                 "action": actions[step].tolist(),
                 "timestamp": step / fps,
-                "annotation.human.action.task_description": task_description,
+                # annotation 列存 task_index（int），指向 tasks.jsonl，不是字符串
+                "annotation.human.action.task_description": 0,
                 "task_index": 0,
                 "episode_index": ep_idx,
                 "index": parquet_idx,
+                "frame_index": step,
                 "next.reward": float(rewards[step]),
                 "next.done": (step == ep_steps - 1),
             }
-            all_rows.append(row)
+            ep_rows.append(row)
             parquet_idx += 1
 
-        if (ep_idx + 1) % 10 == 0 or ep_idx == len(npz_files) - 1:
-            print(f"  ✅ Episode {ep_idx + 1}/{len(npz_files)}  steps={ep_steps}")
+        ep_df = pd.DataFrame(ep_rows)
+        ep_parquet_path = data_dir / f"episode_{ep_idx:06d}.parquet"
+        ep_df.to_parquet(str(ep_parquet_path), index=False)
 
-    df = pd.DataFrame(all_rows)
-    parquet_path = data_dir / "episode_000000.parquet"
-    df.to_parquet(str(parquet_path), index=False)
-    print(f"  📄 Parquet: {len(df)} rows → {parquet_path}")
+        if (ep_idx + 1) % 10 == 0 or ep_idx == len(npz_files) - 1:
+            print(f"  ✅ Episode {ep_idx + 1}/{len(npz_files)}  steps={ep_steps}  → {ep_parquet_path.name}")
 
     with open(meta_dir / "episodes.jsonl", "w") as f:
         for ep_info in episodes_info:
             f.write(json.dumps(ep_info) + "\n")
 
     total_steps = sum(ep["length"] for ep in episodes_info)
+    # info.json：补充 LeRobot v2 标准字段，同时保留本项目维度字段
     info = {
-        "codebase_version": "v2.1",
+        # LeRobot v2 标准字段
+        "codebase_version": "v2.0",
         "robot_type": robot,
         "total_episodes": len(npz_files),
         "total_frames": total_steps,
+        "total_tasks": 1,
         "fps": fps,
-        "rejected": False,
-        # 维度信息：lerobot_loader 依赖这两个字段读取 state/action 维度
+        "splits": {"train": "0:100"},
+        "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+        "video_path": "videos/chunk-{episode_chunk:03d}/observation.images.{video_key}/episode_{episode_index:06d}.mp4",
+        "chunks_size": 1000,
+        "features": {
+            "observation.state": {"dtype": "float32", "shape": [state_dim], "names": None},
+            "action": {"dtype": "float32", "shape": [action_dim], "names": None},
+            "timestamp": {"dtype": "float32", "shape": [1], "names": None},
+            "episode_index": {"dtype": "int64", "shape": [1], "names": None},
+            "index": {"dtype": "int64", "shape": [1], "names": None},
+            "frame_index": {"dtype": "int64", "shape": [1], "names": None},
+            "task_index": {"dtype": "int64", "shape": [1], "names": None},
+        },
+        # 本项目额外维度字段（lerobot_loader 依赖）
         "state_dim": state_dim,
         "action_dim": action_dim,
         "num_joints": num_joints,
@@ -194,7 +221,10 @@ def _build_modality_json(robot: str, num_joints: int, state_dim: int, camera_nam
         "state": slices,
         "action": action_slices,
         "video": video,
-        "annotation": {"human.task_description": {"original_key": "task_index"}},
+        # annotation 指向 parquet 中的 task_index 列（int 索引到 tasks.jsonl）
+        "annotation": {
+            "human.task_description": {"original_key": "task_index"},
+        },
     }
 
 

@@ -47,6 +47,8 @@ NVIDIA Isaac-GR00T 的云端推理 + 本地训练编排兄弟项目。
 
 ./start.sh viser-infer [robot] [host] [port] [viser_port]
 ./start.sh mujoco-infer [robot] [host] [port]
+
+./start.sh eval [robot] [dataset] [host] [port] [traj_ids]   # 开环评估（验证数据链路）
 ```
 
 ### 2. 启动推理服务
@@ -92,6 +94,35 @@ bash scripts/09_local_verify.sh g1 viser                     # 推理验证
 ./start.sh mujoco-infer g1 127.0.0.1 5555
 ```
 
+### 6. 开环评估（验证数据链路）
+
+微调完成后，用 `open_loop_eval` 对比预测动作与 GT 动作的 MSE/MAE，
+验证数据链路（采集→转换→观测格式）是否正确：
+
+```bash
+# 1. 云端启动微调后的 Policy Server
+bash scripts/01_start_server.sh /root/checkpoints/g1_finetune/checkpoint-2000 NEW_EMBODIMENT 5555
+
+# 2. 本地建立 SSH 隧道
+bash scripts/02_local_tunnel.sh
+
+# 3. 本地开环评估（对比预测 vs GT）
+./start.sh eval g1 output/g1_lerobot 127.0.0.1 5555 "0 1 2"
+
+# 或直接调用
+python -m src.open_loop_eval \
+    --dataset output/g1_lerobot --robot g1 \
+    --host 127.0.0.1 --port 5555 \
+    --traj-ids 0 1 2 --action-horizon 16
+```
+
+输出每 episode 的 MSE/MAE 和平均指标，结果保存到 `<robot>_open_loop_eval.json`。
+判断标准（参考官方 `finetune_new_embodiment.md`）：
+- 训练集 traj 上的预测曲线应紧贴 GT
+- MSE 应随训练步数稳步下降
+- 若预测曲线平坦/常数，通常是 modality.json 或观测格式不匹配
+
+
 ## 目录结构
 
 ```
@@ -121,6 +152,7 @@ gr00t_mjlab_autodl/
 │   ├── export_int4_offline.py         # INT4 离线量化（无网络）
 │   ├── quantize_safetensors.py        # NF4 查找表量化核心
 │   ├── infer.py                       # 本地推理包装器
+│   ├── open_loop_eval.py              # 开环评估（验证数据链路，对比 MSE/MAE）
 │   ├── configs/
 │   │   ├── g1_config.py               # G1 人形机器人配置（29 关节）
 │   │   ├── go2_config.py              # Go2 四足机器人配置（12 关节）
@@ -135,7 +167,7 @@ gr00t_mjlab_autodl/
 
 │       ├── viser_infer.py             # Viser + Policy Server 推理可视化
 │       └── mujoco_infer.py            # MuJoCo + Policy Server 推理可视化
-├── tests/                             # 单元测试（142 个测试）
+├── tests/                             # 单元测试（190 个测试）
 │   ├── conftest.py
 │   ├── test_configs.py
 │   ├── test_quantize_safetensors.py
@@ -144,7 +176,8 @@ gr00t_mjlab_autodl/
 │   ├── test_convert_to_lerobot.py
 │   ├── test_export_int4.py
 │   ├── test_observation_builder.py
-│   └── test_policy_client.py
+│   ├── test_policy_client.py
+│   └── test_end_to_end_pipeline.py    # 端到端数据链路测试
 ├── output/                            # 推理输出（gitignore）
 └── plan.md                            # 方案设计文档
 ```
@@ -206,15 +239,16 @@ uv sync --python 3.10
 ## 测试
 
 ```bash
-# 运行全部 142 个单元测试
+# 运行全部 190 个单元测试
 pytest tests/ -v
 
 # 运行指定模块测试
 pytest tests/test_quantize_safetensors.py -v
-pytest tests/test_collect_data.py -v
+pytest tests/test_observation_builder.py -v
+pytest tests/test_end_to_end_pipeline.py -v  # 端到端数据链路
 ```
 
-覆盖：配置、NF4 量化、推理缓冲区、数据采集、格式转换、INT4 导出、观测构建、ZMQ 客户端。
+覆盖：配置、NF4 量化、推理缓冲区、数据采集、格式转换、INT4 导出、观测构建（符合 check_observation 契约）、ZMQ 客户端、端到端数据链路。
 
 ## 常见问题
 
@@ -232,11 +266,13 @@ pytest tests/test_collect_data.py -v
 ## 当前状态
 
 - ✅ 云端推理（ZMQ 客户端 + 云端 Server + SSH 隧道）
-- ✅ 数据采集 + 格式转换 + 上传脚本
+- ✅ 数据采集 + 格式转换 + 上传脚本（LeRobot v2 标准格式）
+- ✅ 观测格式符合 Isaac-GR00T `check_observation` 契约（state 拆分、video 5 维、language dict）
 - ✅ INT4 量化（离线/在线） + 本地推理包装器
 - ✅ Viser / MuJoCo 可视化
-- ✅ 142 个单元测试全部通过
+- ✅ 开环评估（`open_loop_eval.py`，对比 MSE/MAE 验证数据链路）
+- ✅ 190 个单元测试全部通过（含端到端数据链路测试）
 
 ---
 
-> 📝 文档版本：v2.1 | 2026-06-28
+> 📝 文档版本：v2.2 | 2026-07-05

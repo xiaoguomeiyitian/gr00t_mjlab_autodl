@@ -46,11 +46,13 @@ class GR00TLocalInference:
         device: str = "auto",
         action_horizon: int = 16,
         num_obs_steps: int = 1,
+        robot: str = "g1",
     ):
         self.model_path = Path(model_path)
         self.embodiment_tag = embodiment_tag
         self.action_horizon = action_horizon
         self.num_obs_steps = num_obs_steps
+        self.robot = robot
         self._closed = False
 
         if device == "auto":
@@ -177,12 +179,15 @@ class GR00TLocalInference:
         return first_action, info
 
     def _build_observation(self, images: dict, state: np.ndarray, language: str) -> dict:
-        """构建 GR00T 观测格式（复用 ObservationBuilder）。"""
-        from src.observation_builder import ObservationBuilder
+        """构建 GR00T 观测格式（复用 ObservationBuilder，符合 check_observation 契约）。"""
+        from src.observation_builder import ObservationBuilder, state_slices_from_config
         if not hasattr(self, "_obs_builder") or self._obs_builder is None:
+            state_dim = state.shape[-1] if state is not None else 71
             self._obs_builder = ObservationBuilder(
                 camera_keys=list(images.keys()) if images else None,
-                state_dim=state.shape[-1] if state is not None else 71,
+                state_dim=state_dim,
+                state_slices=state_slices_from_config(self.robot),
+                num_obs_steps=self.num_obs_steps,
             )
         return self._obs_builder.build(images=images, state=state, language=language)
 

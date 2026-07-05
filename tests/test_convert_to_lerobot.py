@@ -167,6 +167,23 @@ class TestConvertToLeRobot:
         ep0 = json.loads(lines[0])
         assert ep0["episode_index"] == 0
         assert ep0["length"] == 10
+        # tasks 字段是任务描述列表（与 LeRobot v2 一致）
+        assert "tasks" in ep0
+        assert isinstance(ep0["tasks"], list)
+
+    def test_tasks_jsonl_field_name(self, raw_dir, temp_dir):
+        """tasks.jsonl 字段名必须是 'task'（与 LeRobot v2 / GR00T 一致）。"""
+        output_dir = temp_dir / "g1_lerobot"
+        convert_to_lerobot(
+            input_dir=str(raw_dir),
+            output_dir=str(output_dir),
+            robot="g1",
+        )
+        with open(output_dir / "meta" / "tasks.jsonl") as f:
+            t0 = json.loads(f.readline())
+        assert "task" in t0
+        assert "task_index" in t0
+        assert isinstance(t0["task"], str)
 
     def test_parquet_created(self, raw_dir, temp_dir):
         output_dir = temp_dir / "g1_lerobot"
@@ -176,7 +193,8 @@ class TestConvertToLeRobot:
             robot="g1",
         )
         parquet_files = list((output_dir / "data" / "chunk-000").glob("*.parquet"))
-        assert len(parquet_files) == 1
+        # 每 episode 单独一个 parquet（与 LeRobot v2 一致）
+        assert len(parquet_files) == 2
 
     def test_parquet_content(self, raw_dir, temp_dir):
         output_dir = temp_dir / "g1_lerobot"
@@ -186,13 +204,17 @@ class TestConvertToLeRobot:
             robot="g1",
         )
         import pandas as pd
-        df = pd.read_parquet(str(output_dir / "data" / "chunk-000" / "episode_000000.parquet"))
-        assert len(df) == 20  # 2 episodes × 10 steps
-        assert "observation.state" in df.columns
-        assert "action" in df.columns
-        assert "episode_index" in df.columns
-        assert len(df.iloc[0]["observation.state"]) == 71
-        assert len(df.iloc[0]["action"]) == 29
+        # 每个 parquet 只含该 episode 的行
+        df0 = pd.read_parquet(str(output_dir / "data" / "chunk-000" / "episode_000000.parquet"))
+        assert len(df0) == 10  # 单 episode 10 steps
+        assert "observation.state" in df0.columns
+        assert "action" in df0.columns
+        assert "episode_index" in df0.columns
+        assert len(df0.iloc[0]["observation.state"]) == 71
+        assert len(df0.iloc[0]["action"]) == 29
+        # annotation 列存 int 索引（不是字符串）
+        assert "annotation.human.action.task_description" in df0.columns
+        assert df0.iloc[0]["annotation.human.action.task_description"] == 0
 
     def test_videos_copied(self, raw_dir, temp_dir):
         output_dir = temp_dir / "g1_lerobot"
@@ -201,13 +223,15 @@ class TestConvertToLeRobot:
             output_dir=str(output_dir),
             robot="g1",
         )
-        video_files = list((output_dir / "videos" / "chunk-000").glob("*.mp4"))
-        # 2 episodes × 2 cameras (front + wrist)，wrist 用占位
-        assert len(video_files) == 4
-        # front 视频应存在
-        front_videos = [f for f in video_files if "front" in f.name]
+        # 视频在子目录 observation.images.<cam>/ 下（LeRobot v2 标准）
+        front_dir = output_dir / "videos" / "chunk-000" / "observation.images.front"
+        wrist_dir = output_dir / "videos" / "chunk-000" / "observation.images.wrist"
+        assert front_dir.is_dir()
+        assert wrist_dir.is_dir()
+        front_videos = list(front_dir.glob("*.mp4"))
+        wrist_videos = list(wrist_dir.glob("*.mp4"))
+        # 2 episodes × 2 cameras
         assert len(front_videos) == 2
-        wrist_videos = [f for f in video_files if "wrist" in f.name]
         assert len(wrist_videos) == 2
 
     def test_missing_input_dir(self, temp_dir):
@@ -238,4 +262,5 @@ class TestConvertToLeRobot:
         )
         with open(output_dir / "meta" / "tasks.jsonl") as f:
             task = json.loads(f.readline())
-        assert task["task_description"] == "pick up the red cube"
+        # 字段名是 "task"（LeRobot v2 标准），不是 "task_description"
+        assert task["task"] == "pick up the red cube"

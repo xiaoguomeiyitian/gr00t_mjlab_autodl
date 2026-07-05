@@ -108,8 +108,11 @@ class TestGR00TLocalInference:
         assert mode == "int8"
 
     def test_build_observation(self, temp_dir):
-        """测试观测构建。"""
+        """测试观测构建（符合 check_observation 契约）。"""
         inference = object.__new__(GR00TLocalInference)
+        inference.robot = "g1"
+        inference.num_obs_steps = 1
+        inference._obs_builder = None
         images = {"front": np.zeros((224, 224, 3), dtype=np.uint8)}
         state = np.zeros(71, dtype=np.float32)
 
@@ -117,8 +120,16 @@ class TestGR00TLocalInference:
         assert "video" in obs
         assert "state" in obs
         assert "language" in obs
-        assert obs["language"] == "walk forward"
-        assert obs["state"].shape == (1, 71)
+        # 新契约：state/language 都是 dict
+        assert isinstance(obs["state"], dict)
+        assert isinstance(obs["language"], dict)
+        # state 按 G1 切片拆分
+        assert "joint_pos" in obs["state"]
+        assert obs["state"]["joint_pos"].shape == (1, 1, 29)
+        # language 是 {key: [[str]]}
+        lk = "annotation.human.task_description"
+        assert lk in obs["language"]
+        assert obs["language"][lk][0][0] == "walk forward"
 
     def test_extract_action_ndarray_2d(self, temp_dir):
         """从 2D ndarray 提取动作。"""
@@ -168,6 +179,8 @@ class TestPredictBuffer:
         inference.quant_mode = "none"
         inference.device = "cpu"
         inference.action_horizon = 16
+        inference.robot = "g1"
+        inference.num_obs_steps = 1
         inference._action_buffer = ActionChunkBuffer()
         inference._obs_builder = None
 

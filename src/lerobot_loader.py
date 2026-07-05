@@ -54,7 +54,14 @@ class LeRobotEpisodeLoader:
                 for line in f:
                     line = line.strip()
                     if line:
-                        self.tasks.append(json.loads(line))
+                        entry = json.loads(line)
+                        # 兼容 LeRobot v2 标准 "task" 字段与旧版 "task_description"
+                        task_text = entry.get("task", entry.get("task_description", ""))
+                        self.tasks.append({
+                            "task_index": entry.get("task_index", 0),
+                            "task": task_text,
+                            "task_description": task_text,  # 保留旧字段兼容
+                        })
 
         modality_path = self.meta_dir / "modality.json"
         if modality_path.exists():
@@ -76,6 +83,7 @@ class LeRobotEpisodeLoader:
         return LeRobotEpisode(
             self.data_dir, self.videos_dir, self.episodes[idx],
             self.image_size, self.state_dim, self.action_dim,
+            tasks=self.tasks,
         )
 
 
@@ -90,6 +98,7 @@ class LeRobotEpisode:
         image_size: tuple,
         state_dim: Optional[int] = None,
         action_dim: Optional[int] = None,
+        tasks: Optional[list] = None,
     ):
         self.data_dir = data_dir
         self.videos_dir = videos_dir
@@ -98,6 +107,7 @@ class LeRobotEpisode:
         self.episode_index = episode_meta.get("episode_index", 0)
         self._state_dim = state_dim
         self._action_dim = action_dim
+        self.tasks = tasks or []
 
         self._load_data()
 
@@ -132,24 +142,28 @@ class LeRobotEpisode:
         return self.df.columns.tolist()
 
     def _load_video_frame(self, video_key: str, frame_idx: int) -> Optional[np.ndarray]:
-        """从 mp4 视频文件读取指定帧。"""
-        # 视频路径：videos/chunk-000/<video_key>/episode_000000.mp4
-        # 兼容多种命名
+        """从 mp4 视频文件读取指定帧。
+
+        支持的目录结构（按优先级）：
+          - videos/chunk-000/observation.images.<cam>/episode_000000.mp4  (LeRobot v2 标准)
+          - videos/chunk-000/<cam>/episode_000000.mp4
+          - videos/chunk-000/<cam>_episode_000000.mp4  (旧扁平命名)
+        """
+        ep_name = f"episode_{self.episode_index:06d}.mp4"
         candidates = [
-            self.videos_dir / f"{video_key}" / f"episode_{self.episode_index:06d}.mp4",
-            self.videos_dir / video_key / f"episode_{self.episode_index:06d}.mp4",
+            self.videos_dir / f"observation.images.{video_key}" / ep_name,  # LeRobot v2 标准
+            self.videos_dir / video_key / ep_name,
             self.videos_dir / f"{video_key}_episode_{self.episode_index:06d}.mp4",
+            self.videos_dir / f"episode_{self.episode_index:06d}_{video_key}.mp4",  # 旧扁平带后缀
         ]
-        # 也尝试 rglob
+        # rglob 兜底
         if not any(p.exists() for p in candidates):
-            matches = list(self.videos_dir.rglob(f"episode_{self.episode_index:06d}.mp4"))
-            # 找到路径中含 video_key 的
+            matches = list(self.videos_dir.rglob(ep_name))
             for m in matches:
                 if video_key in str(m) or video_key.replace(".", "_") in str(m):
                     candidates.insert(0, m)
                     break
             if not matches:
-                # 退化为任意匹配
                 matches = list(self.videos_dir.rglob("episode_*.mp4"))
                 if matches:
                     candidates = matches
@@ -217,3 +231,15 @@ class LeRobotEpisode:
             ).astype(np.float32)
 
         return {"images": images, "state": state, "gt_action": gt_action}
+
+    def get_task_description(self, idx: int = 0) -> str:
+        """根据 parquet 行的 task_index 取任务描述（指向 tasks.jsonl）。"""
+        if not self.tasks:
+            return ""
+        if idx < 0 or idx >= len(self.df):
+            return self.tasks[0].get("task", "")
+        row = self.df.iloc[idx]
+        task_idx = int(row.get("task_index", 0))
+        if 0 <= task_idx < len(self.tasks):
+            return self.tasks[task_idx].get("task", "")
+        return self.tasks[0].get("task", "")
