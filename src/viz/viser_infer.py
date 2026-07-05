@@ -152,10 +152,14 @@ class ViserViewer:
             n_inst = len(geom_ids)
             positions = np.zeros((n_inst, 3), dtype=np.float32)
             wxyzs = np.tile([1, 0, 0, 0], (n_inst, 1)).astype(np.float32)
-            # 用初始 geom_xpos/geom_xmat 填充
+            colors = np.zeros((n_inst, 3), dtype=np.uint8)
+            # 用初始 geom_xpos/geom_xmat 填充，并提取每个 geom 的 rgba 颜色
             for j, gid in enumerate(geom_ids):
                 positions[j] = self.data.geom_xpos[gid]
                 wxyzs[j] = _rotmat_to_wxyz(self.data.geom_xmat[gid])
+                # geom_rgba 是 [r,g,b,a] 0-1 浮点，转 0-255 uint8
+                rgba = self.model.geom_rgba[gid]
+                colors[j] = (np.clip(rgba[:3], 0, 1) * 255).astype(np.uint8)
 
             handle = self.vis.scene.add_batched_meshes_simple(
                 name=f"robot/mesh_{mesh_id}",
@@ -163,7 +167,7 @@ class ViserViewer:
                 faces=faces,
                 batched_wxyzs=wxyzs,
                 batched_positions=positions,
-                batched_colors=(180, 180, 180),
+                batched_colors=colors,
             )
             self._batched_handles.append((handle, geom_ids))
 
