@@ -22,16 +22,29 @@ from src.lerobot_loader import LeRobotEpisodeLoader
 
 
 def find_robot_mjcf(robot: str) -> str:
-    """查找机器人 MJCF 文件路径。"""
+    """查找机器人 MJCF 文件路径。
+
+    覆盖 robot_retargeter 的多种目录结构：
+      - <robot>_description/mjcf/<robot>.xml      (g1, h1)
+      - <robot>_description/<robot>.xml           (h1_2, h2)
+      - <robot>_description/mjcf/<robot>_with_hand.xml  (h1_with_hand)
+    """
     candidates = [
-        f"../robot_retargeter/asset/robot/{robot}.xml",
+        f"../robot_retargeter/asset/robot/{robot}_description/mjcf/{robot}.xml",
         f"../robot_retargeter/asset/robot/{robot}_description/{robot}.xml",
+        f"../robot_retargeter/asset/robot/{robot}_description/mjcf/{robot}_with_hand.xml",
+        f"../robot_retargeter/asset/robot/{robot}_description/H2.xml" if robot == "h2" else None,
         f"../Isaac-GR00T/assets/robots/{robot}.xml",
     ]
     for p in candidates:
-        if Path(p).exists():
+        if p and Path(p).exists():
             return p
-    return candidates[0]  # 返回第一个作为默认值
+    # 回退：在 robot_retargeter 目录下递归查找
+    import glob
+    matches = glob.glob(f"../robot_retargeter/asset/robot/{robot}*/**/{robot}*.xml", recursive=True)
+    if matches:
+        return matches[0]
+    return candidates[0]  # 返回第一个作为默认值（会触发"文件不存在"提示）
 
 
 def _reorder_slices(state_keys: list, local_slices: dict) -> dict:
@@ -55,29 +68,135 @@ def _reorder_slices(state_keys: list, local_slices: dict) -> dict:
 
 
 class ViserViewer:
-    """轻量 Viser 查看器（内联实现）。"""
+    """Viser 3D 查看器：用 mujoco 加载 MJCF，用 viser 渲染机器人 mesh。
+
+    每步根据 qpos 做 forward kinematics，更新每个 body 的位姿。
+    """
 
     def __init__(self, port: int = 20006, mjcf_path: str = "", robot: str = "g1"):
         self.port = port
         self.mjcf_path = mjcf_path
         self.robot = robot
-        self.model = None
-        self.vis = None
+        self.model = None       # mujoco MjModel
+        self.data = None        # mujoco MjData
+        self.vis = None         # viser.ViserServer
+        self._mesh_handles = []  # viser MeshHandle 列表（按 geom 顺序）
+        self._geom_body_ids = []  # 每个 geom 对应的 body id
+        self._qpos_addr = None   # 铰接关节 qpos 起始地址（跳过 floating base）
 
     def init(self):
         try:
             import viser
-            self.vis = viser.ViserServer(port=self.port)
-            print(f"✅ Viser 服务已启动: http://localhost:{self.port}")
-        except ImportError:
-            print("⚠️  viser 未安装，仅做推理测试")
+            import trimesh
+            import mujoco
+        except ImportError as e:
+            print(f"⚠️  依赖未安装: {e}，仅做推理测试")
             self.vis = None
+            return
+
+        # 加载 MJCF
+        if not self.mjcf_path or not Path(self.mjcf_path).exists():
+            print(f"⚠️  MJCF 文件不存在: {self.mjcf_path}，仅做推理测试")
+            self.vis = viser.ViserServer(port=self.port)
+            print(f"✅ Viser 服务已启动（无模型）: http://localhost:{self.port}")
+            return
+
+        self.model = mujoco.MjModel.from_xml_path(self.mjcf_path)
+        self.data = mujoco.MjData(self.model)
+        mujoco.mj_forward(self.model, self.data)
+
+        # 启动 Viser
+        self.vis = viser.ViserServer(port=self.port)
+        print(f"✅ Viser 服务已启动: http://localhost:{self.port}")
+        print(f"   MJCF: {self.mjcf_path} (nq={self.model.nq}, nbody={self.model.nbody})")
+
+        # 找到铰接关节 qpos 起始地址（跳过 floating base 的 7 维）
+        self._qpos_addr = 7 if self.model.jnt_type[0] == mujoco.mjtJoint.mjJNT_FREE else 0
+
+        # 为每个 geom 创建 viser mesh
+        # mesh_vertnum[i] / mesh_facenum[i] 是第 i 个 mesh 的顶点/面数量，需累计求偏移
+        vert_offsets = np.cumsum(np.concatenate([[0], self.model.mesh_vertnum]))
+        face_offsets = np.cumsum(np.concatenate([[0], self.model.mesh_facenum]))
+
+        for i in range(self.model.ngeom):
+            gtype = self.model.geom_type[i]
+            body_id = self.model.geom_bodyid[i]
+            self._geom_body_ids.append(body_id)
+
+            if gtype == 7:  # mjGEOM_MESH
+                mesh_id = self.model.geom_dataid[i]
+                if mesh_id < 0:
+                    continue
+                vstart = vert_offsets[mesh_id]
+                vcount = self.model.mesh_vertnum[mesh_id]
+                fstart = face_offsets[mesh_id]
+                fcount = self.model.mesh_facenum[mesh_id]
+                verts = np.asarray(self.model.mesh_vert[vstart:vstart + vcount], dtype=np.float32)
+                faces = np.asarray(self.model.mesh_face[fstart:fstart + fcount], dtype=np.uint32)
+                # geom 局部偏移
+                verts = verts + self.model.geom_pos[i]
+                mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+            elif gtype == 2:  # mjGEOM_SPHERE
+                r = float(self.model.geom_size[i][0])
+                mesh = trimesh.creation.icosphere(subdivisions=2, radius=r)
+                mesh.apply_translation(self.model.geom_pos[i])
+            elif gtype == 3:  # mjGEOM_CAPSULE
+                r, half_len = float(self.model.geom_size[i][0]), float(self.model.geom_size[i][1])
+                mesh = trimesh.creation.capsule(radius=r, height=2 * half_len)
+                mesh.apply_translation(self.model.geom_pos[i])
+            elif gtype == 6:  # mjGEOM_BOX
+                size = self.model.geom_size[i]
+                mesh = trimesh.creation.box(extents=2 * size)
+                mesh.apply_translation(self.model.geom_pos[i])
+            else:
+                continue
+
+            # 用 body 的世界位姿初始化
+            xpos = self.data.xpos[body_id]
+            xquat = self.data.xquat[body_id]
+            handle = self.vis.scene.add_mesh_simple(
+                name=f"geom_{i}",
+                vertices=np.asarray(mesh.vertices, dtype=np.float32),
+                faces=np.asarray(mesh.faces, dtype=np.uint32),
+                position=xpos,
+                wxyz=xquat,
+                color=np.array([0.7, 0.7, 0.75]),
+            )
+            self._mesh_handles.append(handle)
+
+        print(f"   已渲染 {len(self._mesh_handles)} 个 mesh")
 
     def update(self, qpos):
-        pass  # 简化实现
+        """根据关节角度更新机器人姿态。
+
+        Args:
+            qpos: 铰接关节角度（不含 floating base），长度 = model.nq - 7
+        """
+        if self.model is None or self.vis is None:
+            return
+
+        import mujoco
+        # 把 qpos 写入 mujoco data（跳过 floating base 的 7 维）
+        n_artic = self.model.nq - self._qpos_addr
+        if len(qpos) >= n_artic:
+            self.data.qpos[self._qpos_addr:] = qpos[:n_artic]
+        else:
+            self.data.qpos[self._qpos_addr:self._qpos_addr + len(qpos)] = qpos
+        mujoco.mj_kinematics(self.model, self.data)
+        mujoco.mj_comPos(self.model, self.data)
+
+        # 更新每个 mesh 的位姿
+        for i, handle in enumerate(self._mesh_handles):
+            body_id = self._geom_body_ids[i]
+            handle.position = self.data.xpos[body_id]
+            handle.wxyz = self.data.xquat[body_id]
 
     def close(self):
-        pass
+        if self.vis is not None:
+            try:
+                self.vis.stop()
+            except Exception:
+                pass
 
 
 class ViserInferLoop:
@@ -261,6 +380,13 @@ class ViserInferLoop:
         print(f"▶️  开始推理可视化 (host={self.host}:{self.port})")
         print(f"   按 Ctrl+C 停止")
 
+        # 维护绝对关节角状态（用于驱动 Viser 模型）
+        # state 是完整观测向量 (joint_pos + joint_vel + base...)，取前 num_joints 维作为初始 qpos
+        from src.observation_builder import state_slices_from_config
+        slices = state_slices_from_config(self.robot)
+        num_joints = slices["joint_pos"][1] - slices["joint_pos"][0]
+        qpos = state[:num_joints].copy() if len(state) >= num_joints else np.zeros(num_joints, dtype=np.float32)
+
         step = 0
         try:
             while True:
@@ -277,17 +403,21 @@ class ViserInferLoop:
                 # 或 ndarray。提取单步动作向量 (action_dim,)
                 action = self._extract_action_vector(action_result)
 
-                # 更新 3D 模型
-                nq = self.viewer.model.nq if self.viewer.model else len(action)
-                self.viewer.update(action[:nq])
-
-                # 更新状态：action 是 joint_position_delta，仅累加到 joint_pos 切片
-                num_joints = len(action)
-                if len(state) >= num_joints:
-                    state = state.copy()
-                    state[:num_joints] = state[:num_joints] + action
+                # action 是 joint_position_delta，累加到绝对关节角
+                num_act = len(action)
+                if len(qpos) >= num_act:
+                    qpos = qpos.copy()
+                    qpos[:num_act] = qpos[:num_act] + action
                 else:
-                    state = np.atleast_1d(np.array(action, dtype=np.float32))
+                    qpos = np.atleast_1d(np.array(action, dtype=np.float32))
+
+                # 更新 3D 模型（传入绝对关节角，不含 floating base）
+                self.viewer.update(qpos)
+
+                # 同步更新观测状态向量的 joint_pos 切片
+                if len(state) >= num_act:
+                    state = state.copy()
+                    state[:num_act] = qpos[:num_act]
 
                 step += 1
                 time.sleep(1.0 / self.fps)
