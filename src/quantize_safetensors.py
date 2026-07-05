@@ -3,9 +3,6 @@ quantize_safetensors.py — 直接 safetensors NF4 量化核心。
 
 读取 safetensors 文件，对权重进行 NF4 查找表量化。
 适用于内存受限环境，无需加载完整模型。
-
-用法:
-    python -m src.quantize_safetensors --input model.safetensors --output model_int4.safetensors
 """
 
 import argparse
@@ -15,7 +12,6 @@ from typing import Optional
 import numpy as np
 
 
-# NF4 查找表（16 个量化值，QLoRA 原始值）
 NF4_TABLE = np.array([
     -1.0, -0.6962, -0.5251, -0.3949,
     -0.2844, -0.1848, -0.0911, 0.0,
@@ -23,69 +19,83 @@ NF4_TABLE = np.array([
     0.4407, 0.5626, 0.7230, 1.0,
 ], dtype=np.float32)
 
-# NF4 量化块大小
 BLOCK_SIZE = 64
 
 
 def quantize_to_nf4(weight: np.ndarray) -> tuple:
-    """
-    将权重矩阵量化为 NF4 格式。
-
-    Args:
-        weight: 原始权重 (m, n) float16/bfloat16/float32
-
-    Returns:
-        quantized: 量化后的 uint8 数组 (m, n//2)，每字节存 2 个 NF4 值
-        absmax: 每个块的最大绝对值 (m, n//BLOCK_SIZE)
-    """
     original_shape = weight.shape
     original_dtype = weight.dtype
 
-    # 逐行量化，避免 padding 对齐问题
     m, n = original_shape
     n_blocks_per_row = (n + BLOCK_SIZE - 1) // BLOCK_SIZE
     n_padded = n_blocks_per_row * BLOCK_SIZE
     pad_len = n_padded - n
 
-    # Pad 每行
     if pad_len > 0:
         padded = np.pad(weight.astype(np.float32), ((0, 0), (0, pad_len)))
     else:
         padded = weight.astype(np.float32)
 
-    # Reshape 为 (m, n_blocks_per_row, BLOCK_SIZE)
     blocks = padded.reshape(m, n_blocks_per_row, BLOCK_SIZE)
 
-    # 计算每个块的 absmax
-    absmax = np.max(np.abs(blocks), axis=2)  # (m, n_blocks_per_row)
-    absmax = np.maximum(absmax, 1e-8)  # 避免除零
+    absmax = np.max(np.abs(blocks), axis=2)
+    absmax = np.maximum(absmax, 1e-8)
 
-    # 归一化到 [-1, 1]
     normalized = blocks / absmax[:, :, None]
 
-    # 找到最近的 NF4 值
-    indices = np.zeros((m, n_padded), dtype=np.int32)
-    for row in range(m):
-        for col in range(n_blocks_per_row):
-            block = normalized[row, col]
-            dists = np.abs(block[:, None] - NF4_TABLE[None, :])
-            start = col * BLOCK_SIZE
-            indices[row, start:start + BLOCK_SIZE] = np.argmin(dists, axis=1)
+    # 向量化：一次性广播计算所有块到 NF4 表的最近邻索引
+    # normalized: (m, n_blocks, 64), NF4_TABLE: (16,)
+    # dists: (m, n_blocks, 64, 16)
+    dists = np.abs(normalized[..., None] - NF4_TABLE[None, None, None, :])
+    indices = np.argmin(dists, axis=-1).astype(np.int32)  # (m, n_blocks, 64)
+    indices = indices.reshape(m, n_padded)  # (m, n_padded)
 
-    # 裁剪到原始列数
     indices = indices[:, :n]
 
-    # 确保列数为偶数（最后一个值填 0）
     if n % 2 != 0:
         indices = np.pad(indices, ((0, 0), (0, 1)), constant_values=0)
 
-    # 每字节存 2 个 NF4 值（低 4 位 + 高 4 位）
     packed = indices[:, 0::2].astype(np.uint8) | (indices[:, 1::2].astype(np.uint8) << 4)
 
-    # absmax 只保留需要的列
-    absmax = absmax[:, :n_blocks_per_row]
-
     return packed, absmax
+
+
+def dequantize_from_nf4(packed: np.ndarray, absmax: np.ndarray, original_shape: tuple) -> np.ndarray:
+    """从 NF4 量化结果反量化为 float32 权重。
+
+    Args:
+        packed: (m, ceil(n/2)) uint8，每字节含 2 个 4-bit 索引
+        absmax: (m, n_blocks_per_row) float32，每块的绝对最大值
+        original_shape: 原始权重形状 (m, n)
+
+    Returns:
+        weight: (m, n) float32
+    """
+    m, n = original_shape
+    n_blocks_per_row = (n + BLOCK_SIZE - 1) // BLOCK_SIZE
+    n_padded = n_blocks_per_row * BLOCK_SIZE
+
+    # 解包 4-bit 索引
+    low = (packed & 0x0F).astype(np.int32)
+    high = (packed >> 4).astype(np.int32)
+    indices = np.zeros((m, packed.shape[1] * 2), dtype=np.int32)
+    indices[:, 0::2] = low
+    indices[:, 1::2] = high
+    # 解包后长度可能 < n_padded（奇数列时），需 pad 到 n_padded
+    if indices.shape[1] < n_padded:
+        indices = np.pad(indices, ((0, 0), (0, n_padded - indices.shape[1])), constant_values=0)
+    indices = indices[:, :n_padded]
+
+    # 查表
+    blocks = NF4_TABLE[indices]  # (m, n_padded)
+    blocks = blocks.reshape(m, n_blocks_per_row, BLOCK_SIZE)
+
+    # 反归一化
+    dequant_blocks = blocks * absmax[:, :, None]
+    dequant = dequant_blocks.reshape(m, n_padded)
+    dequant = dequant[:, :n]
+
+    return dequant.astype(np.float32)
 
 
 def quantize_safetensors_file(
@@ -94,18 +104,6 @@ def quantize_safetensors_file(
     exclude_patterns: Optional[list] = None,
     verbose: bool = True,
 ) -> dict:
-    """
-    量化 safetensors 文件中的所有权重。
-
-    Args:
-        input_path: 输入 safetensors 文件路径
-        output_path: 输出文件路径（默认在原文件名加 _int4 后缀）
-        exclude_patterns: 要跳过的 key 模式列表
-        verbose: 是否打印详细信息
-
-    Returns:
-        统计信息字典
-    """
     try:
         from safetensors import safe_open
         from safetensors.numpy import save_file
@@ -145,14 +143,12 @@ def quantize_safetensors_file(
             tensor = f.get_tensor(key)
             stats["total_tensors"] += 1
 
-            # 判断是否需要量化
             should_skip = False
             for pattern in exclude_patterns:
                 if pattern.lower() in key.lower():
                     should_skip = True
                     break
 
-            # 只量化 2D 权重
             if tensor.ndim != 2:
                 should_skip = True
 
@@ -167,7 +163,7 @@ def quantize_safetensors_file(
                 quantized_tensors[f"{key}.absmax"] = absmax
                 quantized_tensors[f"{key}.shape"] = np.array(tensor.shape, dtype=np.int32)
                 stats["quantized_tensors"] += 1
-                ratio = tensor.nbytes / (q.nbytes + absmax.nbytes + 12)
+                ratio = tensor.nbytes / (q.nbytes + absmax.nbytes + np.array(tensor.shape, dtype=np.int32).nbytes)
                 stats["details"].append({
                     "key": key,
                     "shape": list(tensor.shape),
@@ -176,7 +172,6 @@ def quantize_safetensors_file(
                 if verbose:
                     print(f"   ✅ 量化: {key} (shape={tensor.shape}, ratio={ratio:.1f}x)")
 
-    # 保存
     save_file(quantized_tensors, str(output_path))
     stats["quantized_size_mb"] = output_path.stat().st_size / (1024 * 1024)
     stats["compression_ratio"] = stats["original_size_mb"] / max(stats["quantized_size_mb"], 0.01)
@@ -193,7 +188,6 @@ def quantize_safetensors_file(
     return stats
 
 
-# ─────────────────── CLI ───────────────────
 def main():
     parser = argparse.ArgumentParser(description="safetensors NF4 量化")
     parser.add_argument("--input", type=str, required=True, help="输入 safetensors 文件")

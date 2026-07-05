@@ -1,33 +1,4 @@
-"""
-retarget_to_lerobot.py — 将 robot_retargeter 的运动数据转换为 GR00T LeRobot v2 格式。
-
-核心转换逻辑：
-  1. 加载 robot_retargeter 的 CSV/NPZ 运动数据
-  2. 计算 GR00T 所需的状态向量（71 维）和 delta 动作（29 维）
-  3. 用 MuJoCo 渲染相机图像 → mp4
-  4. 滑动窗口切分 episode
-  5. 自动生成语言标签
-  6. 输出标准 LeRobot v2 格式
-
-用法:
-    # 从 CSV 转换
-    python -m src.retarget_to_lerobot \
-        --csv ../robot_retargeter/output_data/robot_motion/xxx_g1.csv \
-        --robot g1 \
-        --output output/g1_from_retarget
-
-    # 从 NPZ 转换
-    python -m src.retarget_to_lerobot \
-        --npz ../robot_retargeter/output_data/npz/xxx_g1.npz \
-        --robot g1 \
-        --output output/g1_from_retarget
-
-    # 自定义参数
-    python -m src.retarget_to_lerobot \
-        --csv xxx.csv --robot g1 --output output/g1 \
-        --episode-length 300 --overlap 0.5 --fps 30 \
-        --task "walk forward"
-"""
+"""retarget_to_lerobot.py — robot_retargeter 数据 → LeRobot v2 格式。"""
 
 import argparse
 import json
@@ -41,14 +12,13 @@ from src.retarget_motion_loader import RetargetMotionLoader
 from src.configs.motion_labels import get_motion_label
 
 
-# ─── 机器人配置 ───
 ROBOT_CONFIGS = {
     "g1": {
         "num_joints": 29,
         "state_dim": 71,
         "action_dim": 29,
         "camera_names": ["front", "wrist"],
-        "mjcf_path": None,  # 自动查找
+        "mjcf_path": None,
     },
     "h1": {
         "num_joints": 20,
@@ -94,53 +64,24 @@ def compute_state_vector(
     joint_pos: np.ndarray,
     dt: float,
 ) -> np.ndarray:
-    """
-    计算 GR00T 所需的状态向量。
-
-    Args:
-        base_pos: (T, 3) 基座位置
-        base_quat: (T, 4) 基座四元数 wxyz
-        joint_pos: (T, N) 关节位置
-        dt: 时间步长 (1/fps)
-
-    Returns:
-        states: (T, state_dim) 状态向量
-    """
     T, num_joints = joint_pos.shape
+    joint_vel = np.gradient(joint_pos, dt, axis=0)
+    base_lin_vel = np.gradient(base_pos, dt, axis=0)
+    base_ang_vel = compute_angular_velocity(base_quat, dt)
 
-    # 关节速度（中心差分）
-    joint_vel = np.gradient(joint_pos, dt, axis=0)  # (T, N)
-
-    # 基座线速度
-    base_lin_vel = np.gradient(base_pos, dt, axis=0)  # (T, 3)
-
-    # 基座角速度（从四元数差分计算）
-    base_ang_vel = compute_angular_velocity(base_quat, dt)  # (T, 3)
-
-    # 拼接状态向量
     states = np.concatenate([
-        joint_pos,      # (T, N)
-        joint_vel,      # (T, N)
-        base_pos,       # (T, 3)
-        base_quat,      # (T, 4)
-        base_lin_vel,   # (T, 3)
-        base_ang_vel,   # (T, 3)
+        joint_pos,
+        joint_vel,
+        base_pos,
+        base_quat,
+        base_lin_vel,
+        base_ang_vel,
     ], axis=1)
 
     return states.astype(np.float32)
 
 
 def compute_angular_velocity(quat_wxyz: np.ndarray, dt: float) -> np.ndarray:
-    """
-    从四元数序列计算角速度。
-
-    Args:
-        quat_wxyz: (T, 4) 四元数 wxyz
-        dt: 时间步长
-
-    Returns:
-        ang_vel: (T, 3) 角速度 (rad/s)
-    """
     T = quat_wxyz.shape[0]
     ang_vel = np.zeros((T, 3), dtype=np.float32)
 
@@ -148,20 +89,20 @@ def compute_angular_velocity(quat_wxyz: np.ndarray, dt: float) -> np.ndarray:
         q_prev = quat_wxyz[i - 1]
         q_next = quat_wxyz[i + 1]
 
-        # 相对旋转: q_rel = q_next * conj(q_prev)
         w1, x1, y1, z1 = q_prev
         w2, x2, y2, z2 = q_next
 
-        # conj(q_prev)
         q_conj = np.array([w1, -x1, -y1, -z1])
 
-        # q_rel = q_next * q_conj (四元数乘法)
         w_rel = w2 * q_conj[0] - x2 * q_conj[1] - y2 * q_conj[2] - z2 * q_conj[3]
         x_rel = w2 * q_conj[1] + x2 * q_conj[0] + y2 * q_conj[3] - z2 * q_conj[2]
         y_rel = w2 * q_conj[2] - x2 * q_conj[3] + y2 * q_conj[0] + z2 * q_conj[1]
         z_rel = w2 * q_conj[3] + x2 * q_conj[2] - y2 * q_conj[1] + z2 * q_conj[0]
 
-        # 从四元数提取轴角
+        # 处理四元数双覆盖：w_rel < 0 时翻转 q_rel 到短弧，避免大旋转方向错误
+        if w_rel < 0:
+            w_rel, x_rel, y_rel, z_rel = -w_rel, -x_rel, -y_rel, -z_rel
+
         angle = 2 * np.arctan2(np.sqrt(x_rel ** 2 + y_rel ** 2 + z_rel ** 2), w_rel)
         axis_norm = np.sqrt(x_rel ** 2 + y_rel ** 2 + z_rel ** 2)
 
@@ -169,28 +110,14 @@ def compute_angular_velocity(quat_wxyz: np.ndarray, dt: float) -> np.ndarray:
             axis = np.array([x_rel, y_rel, z_rel]) / axis_norm
             ang_vel[i] = axis * (angle / (2 * dt))
 
-    # 边界处理：复制邻居
     ang_vel[0] = ang_vel[1]
     ang_vel[-1] = ang_vel[-2]
-
     return ang_vel
 
 
 def compute_delta_actions(joint_pos: np.ndarray) -> np.ndarray:
-    """
-    计算 delta 动作（相对增量）。
-
-    action[t] = joint_pos[t+1] - joint_pos[t]
-
-    Args:
-        joint_pos: (T, N) 关节位置
-
-    Returns:
-        actions: (T, N) delta 动作（最后一帧为 0）
-    """
     actions = np.zeros_like(joint_pos)
     actions[:-1] = joint_pos[1:] - joint_pos[:-1]
-    # 最后一帧的动作为 0（或复制前一帧）
     actions[-1] = actions[-2] if len(actions) > 1 else 0
     return actions.astype(np.float32)
 
@@ -200,21 +127,9 @@ def sliding_window_split(
     window_size: int = 300,
     overlap: float = 0.5,
 ) -> list:
-    """
-    滑动窗口切分。
-
-    Args:
-        total_length: 总帧数
-        window_size: 每段长度
-        overlap: 重叠比例 (0-1)
-
-    Returns:
-        episodes: [(start, end), ...] 列表
-    """
     stride = max(1, int(window_size * (1 - overlap)))
     episodes = []
 
-    # 如果总帧数不足以切分至少一个完整 episode，则整个序列作为一个 episode
     if total_length <= window_size:
         episodes.append((0, total_length))
         return episodes
@@ -224,7 +139,6 @@ def sliding_window_split(
         episodes.append((start, start + window_size))
         start += stride
 
-    # 处理尾部（如果有足够帧数）
     if start < total_length and total_length - start >= window_size // 2:
         episodes.append((total_length - window_size, total_length))
 
@@ -242,20 +156,6 @@ def convert_to_lerobot(
     render_videos: bool = True,
     mjcf_path: Optional[str] = None,
 ):
-    """
-    将 robot_retargeter 的运动数据转换为 LeRobot v2 格式。
-
-    Args:
-        motion_file: CSV 或 NPZ 文件路径
-        robot: 机器人类型
-        output_dir: 输出目录
-        episode_length: 每 episode 帧数
-        overlap: episode 重叠比例
-        fps: 帧率（None 则从文件读取）
-        task_description: 任务描述（None 则自动推断）
-        render_videos: 是否渲染视频
-        mjcf_path: MJCF 模型路径（None 则自动查找）
-    """
     if robot not in ROBOT_CONFIGS:
         raise ValueError(f"不支持的机器人: {robot}，可选: {list(ROBOT_CONFIGS.keys())}")
 
@@ -263,7 +163,6 @@ def convert_to_lerobot(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # ─── Step 1: 加载运动数据 ───
     print(f"📦 转换: {motion_file}")
     print(f"   机器人: {robot}")
     print(f"   输出: {output_path}")
@@ -277,24 +176,19 @@ def convert_to_lerobot(
     print(f"   总帧数: {T}, FPS: {actual_fps}, 时长: {T / actual_fps:.1f}s")
     print()
 
-    # ─── Step 2: 计算状态向量 ───
     print("📊 计算状态向量...")
     states = compute_state_vector(base_pos, base_quat, joint_pos, dt)
     print(f"   states: {states.shape}")
 
-    # ─── Step 3: 计算 delta 动作 ───
     print("🔧 计算 delta 动作...")
     actions = compute_delta_actions(joint_pos)
     print(f"   actions: {actions.shape}")
 
-    # ─── Step 4: 推断任务描述 ───
     if task_description is None:
         task_description = get_motion_label(motion_file)
     print(f"   任务描述: {task_description}")
     print()
 
-    # ─── Step 5: 滑动窗口切分 episode ───
-    # 自动调整 episode 长度：如果数据帧数不足，使用数据帧数作为 episode 长度
     actual_episode_length = min(episode_length, T)
     if actual_episode_length < episode_length:
         print(f"   ⚠️  数据帧数 ({T}) < 请求的 episode 长度 ({episode_length})")
@@ -304,7 +198,6 @@ def convert_to_lerobot(
     print(f"   切分为 {len(episodes)} 个 episode")
     print()
 
-    # ─── Step 6: 创建输出目录结构 ───
     meta_dir = output_path / "meta"
     data_dir = output_path / "data" / "chunk-000"
     videos_dir = output_path / "videos" / "chunk-000"
@@ -312,7 +205,6 @@ def convert_to_lerobot(
     data_dir.mkdir(parents=True, exist_ok=True)
     videos_dir.mkdir(parents=True, exist_ok=True)
 
-    # ─── Step 7: 写入 modality.json ───
     num_joints = config["num_joints"]
     modality = {
         "state": {
@@ -337,15 +229,27 @@ def convert_to_lerobot(
     with open(meta_dir / "modality.json", "w") as f:
         json.dump(modality, f, indent=2)
 
-    # ─── Step 8: 写入 tasks.jsonl ───
     with open(meta_dir / "tasks.jsonl", "w") as f:
         f.write(json.dumps({"task_index": 0, "task_description": task_description}) + "\n")
 
-    # ─── Step 9: 处理每个 episode ───
     print("📝 处理 episodes...")
     all_rows = []
     episodes_info = []
     total_frames = 0
+
+    # 在循环外构造一次 renderer，避免每 episode 重复加载 MJCF
+    shared_renderer = None
+    if render_videos:
+        try:
+            from src.mujoco_renderer import MujocoRenderer
+            shared_renderer = MujocoRenderer(
+                mjcf_path=mjcf_path or config.get("mjcf_path"),
+                robot=robot,
+                image_size=(224, 224),
+            )
+        except Exception as e:
+            print(f"   ⚠️  MuJoCo 渲染器初始化失败，将使用占位视频: {e}")
+            shared_renderer = None
 
     for ep_idx, (start, end) in enumerate(episodes):
         ep_states = states[start:end]
@@ -358,7 +262,6 @@ def convert_to_lerobot(
             "task_index": 0,
         })
 
-        # 构建 parquet 行
         for step in range(ep_steps):
             row = {
                 "observation.state": ep_states[step].tolist(),
@@ -375,56 +278,47 @@ def convert_to_lerobot(
 
         total_frames += ep_steps
 
-        # 渲染视频
         if render_videos:
             ep_joint_pos = joint_pos[start:end]
             ep_base_pos = base_pos[start:end]
             ep_base_quat = base_quat[start:end]
 
-            # 只渲染第一个相机（节省时间）
-            cam_name = config["camera_names"][0]
             video_path = videos_dir / f"episode_{ep_idx:06d}.mp4"
 
-            try:
-                from src.mujoco_renderer import MujocoRenderer
-                renderer = MujocoRenderer(
-                    mjcf_path=mjcf_path or config.get("mjcf_path"),
-                    robot=robot,
-                    image_size=(224, 224),
-                )
-                renderer.render_motion(
-                    joint_pos=ep_joint_pos,
-                    output_path=str(video_path),
-                    base_pos=ep_base_pos,
-                    base_quat=ep_base_quat,
-                    camera_name=None,  # 使用第一个可用相机
-                    fps=actual_fps,
-                )
-            except Exception as e:
-                print(f"   ⚠️  视频渲染失败 (episode {ep_idx}): {e}")
-                # 创建占位视频
+            if shared_renderer is not None:
+                try:
+                    shared_renderer.render_motion(
+                        joint_pos=ep_joint_pos,
+                        output_path=str(video_path),
+                        base_pos=ep_base_pos,
+                        base_quat=ep_base_quat,
+                        camera_name=None,
+                        fps=actual_fps,
+                    )
+                except Exception as e:
+                    print(f"   ⚠️  视频渲染失败 (episode {ep_idx}): {e}")
+                    _create_placeholder_video(str(video_path), ep_steps, int(actual_fps))
+            else:
                 _create_placeholder_video(str(video_path), ep_steps, int(actual_fps))
 
         if (ep_idx + 1) % 10 == 0 or ep_idx == len(episodes) - 1:
             print(f"  ✅ Episode {ep_idx + 1}/{len(episodes)}")
 
-    # ─── Step 10: 写入 parquet ───
     df = pd.DataFrame(all_rows)
     parquet_path = data_dir / "episode_000000.parquet"
     df.to_parquet(str(parquet_path), index=False)
     print(f"  📄 Parquet: {len(df)} rows → {parquet_path}")
 
-    # ─── Step 11: 写入 episodes.jsonl ───
     with open(meta_dir / "episodes.jsonl", "w") as f:
         for ep_info in episodes_info:
             f.write(json.dumps(ep_info) + "\n")
 
-    # ─── Step 12: 写入 info.json ───
     info = {
         "codebase_version": "v2.1",
         "robot_type": robot,
-        "total_episodes": len(episodes),
+        "num_episodes": len(episodes),
         "total_frames": total_frames,
+        "task_label": task_description,
         "fps": actual_fps,
         "rejected": False,
         "source": "robot_retargeter",
@@ -434,7 +328,6 @@ def convert_to_lerobot(
     with open(meta_dir / "info.json", "w") as f:
         json.dump(info, f, indent=2)
 
-    # ─── 完成 ───
     print()
     print("📊 转换完成")
     print(f"   Episodes: {len(episodes)}")
@@ -445,6 +338,8 @@ def convert_to_lerobot(
     print("   下一步:")
     print(f"   ./start.sh upload {robot} {output_path}")
     print(f"   ./start.sh train {robot}")
+
+    return info
 
 
 def _create_placeholder_video(path: str, num_frames: int, fps: int):
@@ -466,7 +361,6 @@ def _create_placeholder_video(path: str, num_frames: int, fps: int):
     writer.release()
 
 
-# ─── CLI ───
 def main():
     parser = argparse.ArgumentParser(
         description="将 robot_retargeter 的运动数据转换为 GR00T LeRobot v2 格式",

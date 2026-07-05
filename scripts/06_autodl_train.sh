@@ -1,12 +1,10 @@
 #!/bin/bash
-# ─── 云端微调训练 ───
-# 在 AutoDL 服务器上执行（通过 SSH 远程命令运行）
+# ─── 云端微调训练 — 在 AutoDL 服务器上执行 ───
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "$SCRIPT_DIR/config/ssh_config.sh"
 
-# ─── 默认参数 ───
 ROBOT="${1:-g1}"
 REMOTE_DATA="/root/gr00t_mjlab_autodl/${ROBOT}_lerobot"
 REMOTE_MODALITY_CONFIG="/root/gr00t_mjlab_autodl/${ROBOT}_modality_config.py"
@@ -23,10 +21,8 @@ echo "   最大步数: $MAX_STEPS"
 echo "   GPU 数: $NUM_GPUS"
 echo ""
 
-# 远端执行训练
 ssh -p ${SSH_PORT} ${SSH_USER}@${SSH_HOST} << REMOTE_SCRIPT
     set -e
-
     echo "📂 检查训练数据..."
     if [ ! -d "$REMOTE_DATA" ]; then
         echo "❌ 未找到训练数据: $REMOTE_DATA"
@@ -39,15 +35,27 @@ ssh -p ${SSH_PORT} ${SSH_USER}@${SSH_HOST} << REMOTE_SCRIPT
     if [ -f "$REMOTE_MODALITY_CONFIG" ]; then
         cat "$REMOTE_MODALITY_CONFIG"
     else
-        echo "⚠️  未找到 modality_config: $REMOTE_MODALITY_CONFIG"
-        echo "   将使用默认配置"
+        echo "⚠️  未找到 modality_config，将使用默认配置"
     fi
     echo ""
 
     echo "🚀 开始训练..."
-    cd /autodl-fs/data/Isaac-GR00T
+    # Isaac-GR00T 路径：优先 00_autodl_init.sh 的默认克隆位置（项目父目录），
+    # 回退 AutoDL 数据盘 /autodl-fs/data/Isaac-GR00T
+    ISAAC_DIR=""
+    for cand in \"\$HOME/Isaac-GR00T\" \"/root/Isaac-GR00T\" \"/autodl-fs/data/Isaac-GR00T\"; do
+        if [ -d \"\$cand\" ]; then
+            ISAAC_DIR=\"\$cand\"
+            break
+        fi
+    done
+    if [ -z \"\$ISAAC_DIR\" ]; then
+        echo \"❌ 未找到 Isaac-GR00T，请先执行 00_autodl_init.sh\"
+        exit 1
+    fi
+    echo \"   Isaac-GR00T: \$ISAAC_DIR\"
+    cd \"\$ISAAC_DIR\"
 
-    # 检查 uv 是否可用
     if command -v uv &> /dev/null; then
         PYTHON_CMD="uv run python"
     else
@@ -68,13 +76,9 @@ ssh -p ${SSH_PORT} ${SSH_USER}@${SSH_HOST} << REMOTE_SCRIPT
         --global-batch-size 32 \\
         --dataloader-num-workers 4
 
-    echo ""
     echo "✅ 训练完成！"
-    echo "📂 检查点目录:"
     ls -la "$REMOTE_OUTPUT/"
 REMOTE_SCRIPT
 
-echo ""
-echo "✅ 云端训练完成！"
-echo "   模型路径: ${SSH_HOST}:${REMOTE_OUTPUT}"
-echo "   下一步: bash scripts/07_download_model.sh $ROBOT"
+echo "✅ 云端训练完成！模型路径: ${SSH_HOST}:${REMOTE_OUTPUT}"
+echo "下一步: bash scripts/07_download_model.sh $ROBOT"

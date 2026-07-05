@@ -13,3 +13,8 @@ checkpoints/
 
 # 敏感信息
 config/ssh_config.sh
+
+# 测试覆盖率产物
+.coverage
+*.coverage
+htmlcov/

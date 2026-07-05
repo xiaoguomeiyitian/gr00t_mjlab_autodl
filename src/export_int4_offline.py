@@ -1,12 +1,4 @@
-"""
-export_int4_offline.py — INT4 离线量化（跳过 backbone 下载）。
-
-在无网络环境下对本地 safetensors 进行 NF4 量化。
-适用于 AutoDL 断网后或离线部署场景。
-
-用法:
-    python -m src.export_int4_offline --model-path ./checkpoints/g1_finetune --output-dir ./checkpoints/g1_int4
-"""
+"""export_int4_offline.py — INT4 离线量化（跳过 backbone）。"""
 
 import argparse
 import os
@@ -26,42 +18,29 @@ def export_int4_offline(
     exclude_backbone: bool = True,
     verbose: bool = True,
 ) -> dict:
-    """
-    离线模式 INT4 量化。
-
-    逐文件扫描 safetensors，对 2D 权重做 NF4 查找表量化。
-    不需要 torch / transformers / BitsAndBytes。
-
-    Args:
-        model_path: BF16 模型目录
-        output_dir: 输出目录
-        exclude_backbone: 跳过 backbone 层（Cosmos-Reason2）
-        verbose: 打印详情
-    """
     model_path = Path(model_path)
     if output_dir is None:
         output_dir = model_path.parent / f"{model_path.name}_int4_offline"
     else:
         output_dir = Path(output_dir)
 
-    # 先检查输入
     safetensors_files = sorted(model_path.glob("*.safetensors"))
     if not safetensors_files:
         raise FileNotFoundError(f"未找到 safetensors: {model_path}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # backbone 关键词
     backbone_patterns = [
         "cosmos", "reason", "backbone", "vision_encoder",
         "image_encoder", "patch_embed", "cls_token",
-        "pos_embed", "rel_pos", "attn.0", "attn.1",
+        "pos_embed", "rel_pos",
+        # 用精确前缀避免误伤扩散头：backbone.attn.0 / backbone.attn.1
+        "backbone.attn.0", "backbone.attn.1",
     ]
 
-    # 通用跳过模式
     skip_patterns = [
         "layernorm", "layer_norm", "bias",
-        "embedding", "norm.", "ln_",
+        "embedding", "norm", "ln_",
     ]
 
     if verbose:
@@ -70,13 +49,7 @@ def export_int4_offline(
         print(f"   输出: {output_dir}")
         print(f"   排除 backbone: {exclude_backbone}")
 
-    stats = {
-        "total_tensors": 0,
-        "quantized": 0,
-        "skipped": 0,
-        "original_mb": 0,
-        "quantized_mb": 0,
-    }
+    stats = {"total_tensors": 0, "quantized": 0, "skipped": 0, "original_mb": 0, "quantized_mb": 0}
 
     for sf_idx, sf_path in enumerate(safetensors_files):
         tensors = {}
@@ -88,18 +61,15 @@ def export_int4_offline(
 
                 should_skip = False
 
-                # 跳过非 2D
                 if tensor.ndim != 2:
                     should_skip = True
 
-                # 跳过通用模式
                 if not should_skip:
                     for pattern in skip_patterns:
                         if pattern in key.lower():
                             should_skip = True
                             break
 
-                # 跳过 backbone
                 if not should_skip and exclude_backbone:
                     for pattern in backbone_patterns:
                         if pattern in key.lower():
@@ -122,7 +92,6 @@ def export_int4_offline(
         if verbose:
             print(f"  ✅ [{sf_idx+1}/{len(safetensors_files)}] {sf_path.name}")
 
-    # 复制配置文件
     import shutil
     for fname in ["config.json", "processor_config.json", "preprocessor_config.json",
                    "tokenizer_config.json", "vocab.json", "merges.txt"]:

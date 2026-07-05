@@ -127,6 +127,33 @@ class TestConvertToLeRobot:
         assert info["total_episodes"] == 2
         assert info["total_frames"] == 20
         assert info["fps"] == 30
+        # 验证维度字段（lerobot_loader 依赖）
+        assert info["state_dim"] == 71
+        assert info["action_dim"] == 29
+        assert info["num_joints"] == 29
+
+    def test_info_json_go2_dims(self, temp_dir):
+        """go2 转换后 info.json 维度正确。"""
+        raw = temp_dir / "go2_raw"
+        raw.mkdir()
+        np.savez_compressed(
+            str(raw / "episode_0000.npz"),
+            states=np.random.randn(5, 37).astype(np.float32),
+            actions=np.random.randn(5, 12).astype(np.float32),
+            rewards=np.zeros(5, dtype=np.float32),
+        )
+        _create_placeholder_video(str(raw / "episode_0000.mp4"), 5, 30, ["front"])
+        meta = {"robot": "go2", "state_dim": 37, "action_dim": 12, "num_joints": 12,
+                "camera_names": ["front", "back"], "fps": 30, "action_mode": "delta",
+                "num_episodes": 1, "episode_length": 5, "image_size": [32, 32], "task": "trot"}
+        with open(raw / "collection_meta.json", "w") as f:
+            json.dump(meta, f)
+        out = temp_dir / "go2_lerobot"
+        convert_to_lerobot(input_dir=str(raw), output_dir=str(out), robot="go2")
+        info = json.load(open(out / "meta" / "info.json"))
+        assert info["state_dim"] == 37
+        assert info["action_dim"] == 12
+        assert info["num_joints"] == 12
 
     def test_episodes_jsonl(self, raw_dir, temp_dir):
         output_dir = temp_dir / "g1_lerobot"
@@ -176,7 +203,13 @@ class TestConvertToLeRobot:
             robot="g1",
         )
         video_files = list((output_dir / "videos" / "chunk-000").glob("*.mp4"))
-        assert len(video_files) == 2
+        # 2 episodes × 2 cameras (front + wrist)，wrist 用占位
+        assert len(video_files) == 4
+        # front 视频应存在
+        front_videos = [f for f in video_files if "front" in f.name]
+        assert len(front_videos) == 2
+        wrist_videos = [f for f in video_files if "wrist" in f.name]
+        assert len(wrist_videos) == 2
 
     def test_missing_input_dir(self, temp_dir):
         with pytest.raises(FileNotFoundError):

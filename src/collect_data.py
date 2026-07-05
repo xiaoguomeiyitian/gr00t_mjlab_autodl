@@ -1,13 +1,4 @@
-"""
-collect_data.py — MJLab 仿真数据采集。
-
-支持 4 种采集策略和 6 种机器人（G1 / H1 / H1+Hand / H1.2 / H2 / Go2）。
-输出：{robot}_raw/ 目录（episode_*.npz + episode_*.mp4）
-
-用法:
-    python -m src.collect_data --robot g1 --num-episodes 50 --output-dir g1_raw
-    python -m src.collect_data --robot go2 --num-episodes 30 --output-dir go2_raw
-"""
+"""collect_data.py — MJLab 仿真数据采集。"""
 
 import argparse
 import time
@@ -18,8 +9,6 @@ import cv2
 import numpy as np
 
 
-# ─────────────────── 机器人配置 ───────────────────
-# state_dim = num_joints(joint_pos) + num_joints(joint_vel) + 3(base_pos) + 4(base_quat) + 3(base_lin_vel) + 3(base_ang_vel)
 ROBOT_CONFIGS = {
     "g1": {
         "task": "Mjlab-Velocity-Flat-Unitree-G1",
@@ -80,17 +69,6 @@ class DataCollector:
         image_size: tuple = (224, 224),
         seed: int = 42,
     ):
-        """
-        Args:
-            robot: 机器人类型 (g1 / h1 / h1_with_hand / h1_2 / h2 / go2)
-            task: MJLab 任务名（默认从 ROBOT_CONFIGS 取）
-            action_mode: 动作模式 ("absolute" / "delta" / "relative_eef")
-            num_episodes: 采集 episode 数量
-            episode_length: 每 episode 步数
-            fps: 视频帧率
-            image_size: 图像尺寸 (H, W)
-            seed: 随机种子
-        """
         if robot not in ROBOT_CONFIGS:
             raise ValueError(f"不支持的机器人: {robot}，可选: {list(ROBOT_CONFIGS.keys())}")
 
@@ -103,14 +81,10 @@ class DataCollector:
         self.fps = fps
         self.image_size = image_size
         self.rng = np.random.RandomState(seed)
+        # absolute 模式的 episode 级相位偏移（在 _collect_episode 中重置）
+        self._abs_phase_offset = self.rng.randn(self.config["num_joints"]) * 0.01
 
     def run(self, output_dir: str = "g1_raw"):
-        """
-        运行数据采集。
-
-        Args:
-            output_dir: 输出目录路径
-        """
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
@@ -123,14 +97,9 @@ class DataCollector:
         print(f"   输出: {output_path}")
         print()
 
-        # 创建 MJLab 环境
         env = self._create_env()
 
-        stats = {
-            "total_steps": 0,
-            "start_time": time.time(),
-            "episodes": [],
-        }
+        stats = {"total_steps": 0, "start_time": time.time(), "episodes": []}
 
         for ep_idx in range(self.num_episodes):
             ep_data = self._collect_episode(env, ep_idx, output_path)
@@ -141,12 +110,7 @@ class DataCollector:
             avg_time = elapsed / (ep_idx + 1)
             eta = avg_time * (self.num_episodes - ep_idx - 1)
 
-            print(
-                f"  ✅ Episode {ep_idx + 1}/{self.num_episodes}  "
-                f"steps={ep_data['steps']}  "
-                f"reward={ep_data['reward']:.2f}  "
-                f"ETA={eta:.0f}s"
-            )
+            print(f"  ✅ Episode {ep_idx + 1}/{self.num_episodes}  steps={ep_data['steps']}  reward={ep_data['reward']:.2f}  ETA={eta:.0f}s")
 
         elapsed = time.time() - stats["start_time"]
         print(f"\n📊 采集完成")
@@ -154,15 +118,11 @@ class DataCollector:
         print(f"   总耗时: {elapsed:.1f}s")
         print(f"   输出目录: {output_path}")
 
-        # 保存 metadata
         self._save_metadata(output_path, stats)
-
         return stats
 
     def _create_env(self):
-        """创建 MJLab 仿真环境。"""
         try:
-            import mujoco
             from src.mjlab_env import MjLabEnv
 
             env = MjLabEnv(
@@ -175,70 +135,66 @@ class DataCollector:
         except ImportError as e:
             print(f"⚠️  无法创建 MJLab 环境: {e}")
             print(f"   将使用模拟环境（生成随机数据用于测试）")
-            return _MockEnv(self.config, self.rng)
+            return _MockEnv(self.config, self.rng,
+                            episode_length=self.episode_length,
+                            image_size=self.image_size)
 
     def _collect_episode(self, env, ep_idx: int, output_path: Path) -> dict:
-        """采集单个 episode。"""
         obs = env.reset()
-        frames = []
+        # 每相机独立帧列表
+        frames_by_cam = {cam: [] for cam in self.config["camera_names"]}
         states = []
         actions = []
         rewards = []
         total_reward = 0.0
 
+        # absolute 模式：每 episode 采样一次固定相位偏移，避免每步重采样破坏波形
+        self._abs_phase_offset = self.rng.randn(self.config["num_joints"]) * 0.01
+
         for step in range(self.episode_length):
-            # 获取当前状态
             state = self._extract_state(obs)
-            image = self._extract_image(obs)
+            images = self._extract_image(obs)
 
-            # 生成动作
             action = self._generate_action(state, step)
-
-            # 执行动作
             next_obs, reward, done, info = env.step(action)
             total_reward += reward
 
-            # 保存数据
-            frames.append(image)  # dict of {camera_name: ndarray}
+            for cam in self.config["camera_names"]:
+                frames_by_cam[cam].append(images[cam])
             states.append(state)
             actions.append(action)
             rewards.append(reward)
-
             obs = next_obs
 
             if done:
                 break
 
-        steps = len(frames)
+        steps = len(states)
 
-        # 保存 npz
         npz_path = output_path / f"episode_{ep_idx:04d}.npz"
         np.savez_compressed(
             str(npz_path),
-            states=np.stack(states),           # (T, state_dim)
-            actions=np.stack(actions),         # (T, action_dim)
-            rewards=np.array(rewards),         # (T,)
+            states=np.stack(states),
+            actions=np.stack(actions),
+            rewards=np.array(rewards),
             task_name=self.task,
             robot=self.robot,
             action_mode=self.action_mode,
         )
 
-        # 保存 mp4
-        mp4_path = output_path / f"episode_{ep_idx:04d}.mp4"
-        self._save_video(frames, str(mp4_path))
+        # 每相机分别保存视频
+        mp4_paths = {}
+        for cam in self.config["camera_names"]:
+            if frames_by_cam[cam]:
+                mp4_path = output_path / f"episode_{ep_idx:04d}_{cam}.mp4"
+                self._save_video(frames_by_cam[cam], str(mp4_path))
+                mp4_paths[cam] = str(mp4_path)
 
-        return {
-            "episode": ep_idx,
-            "steps": steps,
-            "reward": total_reward,
-            "npz": str(npz_path),
-            "mp4": str(mp4_path),
-        }
+        return {"episode": ep_idx, "steps": steps, "reward": total_reward,
+                "npz": str(npz_path), "mp4": mp4_paths}
 
     def _extract_state(self, obs) -> np.ndarray:
-        """从观测中提取状态向量。"""
         if isinstance(obs, dict):
-            # MJLab 环境
             qpos = obs.get("qpos", np.zeros(self.config["state_dim"]))
             qvel = obs.get("qvel", np.zeros(self.config["action_dim"]))
             base_pos = obs.get("base_pos", np.zeros(3))
@@ -246,20 +202,15 @@ class DataCollector:
             base_lin_vel = obs.get("base_lin_vel", np.zeros(3))
             base_ang_vel = obs.get("base_ang_vel", np.zeros(3))
 
-            state = np.concatenate([
-                qpos[:self.config["num_joints"]],   # joint_pos
-                qvel[:self.config["num_joints"]],   # joint_vel
-                base_pos,                            # base_pos (3)
-                base_quat,                           # base_quat (4)
-                base_lin_vel,                        # base_lin_vel (3)
-                base_ang_vel,                        # base_ang_vel (3)
+            return np.concatenate([
+                qpos[:self.config["num_joints"]],
+                qvel[:self.config["num_joints"]],
+                base_pos, base_quat, base_lin_vel, base_ang_vel,
             ])
-            return state
         else:
             return np.zeros(self.config["state_dim"])
 
     def _extract_image(self, obs) -> dict:
-        """从观测中提取相机图像。"""
         images = {}
         if isinstance(obs, dict):
             for cam_name in self.config["camera_names"]:
@@ -269,31 +220,25 @@ class DataCollector:
                         img = cv2.resize(img, (self.image_size[1], self.image_size[0]))
                     images[cam_name] = img
                 else:
-                    # 生成占位图
-                    images[cam_name] = np.zeros(
-                        (self.image_size[0], self.image_size[1], 3), dtype=np.uint8
-                    )
+                    images[cam_name] = np.zeros((self.image_size[0], self.image_size[1], 3), dtype=np.uint8)
         return images
 
     def _generate_action(self, state: np.ndarray, step: int) -> np.ndarray:
-        """根据 action_mode 生成动作。"""
         num_joints = self.config["num_joints"]
         joint_pos = state[:num_joints]
 
         if self.action_mode == "absolute":
-            # 绝对关节角（加噪声的正弦步态）
             t = step / self.fps
-            freq = 2.0 * np.pi * 0.5  # 0.5 Hz
+            freq = 2.0 * np.pi * 0.5
             amplitude = 0.3
-            action = joint_pos + amplitude * np.sin(freq * t + self.rng.randn(num_joints) * 0.01)
+            # 用 episode 级固定相位偏移，避免每步重采样破坏正弦波形
+            action = joint_pos + amplitude * np.sin(freq * t + self._abs_phase_offset)
         elif self.action_mode == "delta":
-            # 相对增量
             t = step / self.fps
             freq = 2.0 * np.pi * 0.5
             amplitude = 0.02
             action = amplitude * np.sin(freq * t + np.arange(num_joints) * 0.2)
         elif self.action_mode == "relative_eef":
-            # 末端执行器位姿增量（近似为关节增量）
             action = self.rng.randn(num_joints).astype(np.float32) * 0.01
         else:
             raise ValueError(f"未知动作模式: {self.action_mode}")
@@ -301,30 +246,18 @@ class DataCollector:
         return action.astype(np.float32)
 
     def _save_video(self, frames: list, path: str, fps: Optional[int] = None):
-        """保存图像序列为 mp4 视频（使用第一个相机视角）。"""
         if not frames:
             return
 
         fps = fps or self.fps
-
-        # frames 是 dict 列表，取第一个相机
-        first_cam = self.config["camera_names"][0]
-        images = []
-        for frame in frames:
-            if isinstance(frame, dict):
-                img = frame.get(first_cam)
-                if img is not None:
-                    images.append(img)
-            elif isinstance(frame, np.ndarray):
-                images.append(frame)
-
+        # frames 现为单相机的 ndarray 帧列表
+        images = [f for f in frames if isinstance(f, np.ndarray)]
         if not images:
             return
 
         h, w = images[0].shape[:2]
-
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(path, fourcc, fps, (w, h))
+        writer = cv2.VideoWriter(path, fourcc, fps, (w, h), isColor=True)
 
         for img in images:
             if img.ndim == 3 and img.shape[2] == 3:
@@ -336,7 +269,6 @@ class DataCollector:
         writer.release()
 
     def _save_metadata(self, output_path: Path, stats: dict):
-        """保存采集 metadata。"""
         import json
 
         meta = {
@@ -360,12 +292,18 @@ class DataCollector:
 
 
 class _MockEnv:
-    """模拟环境（无 MJLab 时用于测试数据采集流程）。"""
+    """模拟环境（无 MJLab 时用于测试数据采集流程）。
 
-    def __init__(self, config: dict, rng: np.random.RandomState):
+    注意：此为测试桩，保留在 src/ 仅为兼容旧测试。新代码应使用 tests/ 下的 fixture。
+    """
+
+    def __init__(self, config: dict, rng: np.random.RandomState,
+                 episode_length: int = 300, image_size: tuple = (224, 224)):
         self.config = config
         self.rng = rng
         self.step_count = 0
+        self.episode_length = episode_length
+        self.image_size = image_size
 
     def reset(self) -> dict:
         self.step_count = 0
@@ -374,11 +312,12 @@ class _MockEnv:
     def step(self, action: np.ndarray) -> tuple:
         self.step_count += 1
         reward = float(self.rng.randn() * 0.1)
-        done = self.step_count >= 300
+        done = self.step_count >= self.episode_length
         return self._get_obs(), reward, done, {}
 
     def _get_obs(self) -> dict:
         num_joints = self.config["num_joints"]
+        h, w = self.image_size
         return {
             "qpos": self.rng.randn(num_joints).astype(np.float32) * 0.5,
             "qvel": self.rng.randn(num_joints).astype(np.float32) * 0.1,
@@ -387,13 +326,12 @@ class _MockEnv:
             "base_lin_vel": self.rng.randn(3).astype(np.float32) * 0.05,
             "base_ang_vel": self.rng.randn(3).astype(np.float32) * 0.05,
             "images": {
-                cam: self.rng.randint(0, 255, (*self.config.get("image_size", (224, 224)), 3), dtype=np.uint8)
+                cam: self.rng.randint(0, 255, (h, w, 3), dtype=np.uint8)
                 for cam in self.config["camera_names"]
             },
         }
 
 
-# ─────────────────── CLI ───────────────────
 def main():
     parser = argparse.ArgumentParser(description="MJLab 仿真数据采集")
     parser.add_argument("--robot", type=str, default="g1",

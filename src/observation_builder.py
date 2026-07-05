@@ -1,10 +1,5 @@
 """
 Observation Builder — 从机器人环境数据构建 GR00T 观测字典。
-
-支持:
-- 多相机图像（自动 resize 到 224×224）
-- 关节状态拼接
-- 语言指令注入
 """
 
 from typing import Optional
@@ -22,14 +17,8 @@ class ObservationBuilder:
         image_size: tuple = (224, 224),
         language_instruction: str = "perform the task",
     ):
-        """
-        Args:
-            camera_keys: 相机 key 列表，如 ["exterior_image_1_left", "wrist_image_left"]
-            state_dim: 状态维度（G1=71, Go2=37）
-            image_size: 图像尺寸 (H, W)
-            language_instruction: 默认语言指令
-        """
-        self.camera_keys = camera_keys or ["exterior_image_1_left"]
+        # 默认相机键与 modality_config 的 video.modality_keys 命名一致
+        self.camera_keys = camera_keys or ["front", "wrist"]
         self.state_dim = state_dim
         self.image_size = image_size
         self.language_instruction = language_instruction
@@ -40,18 +29,6 @@ class ObservationBuilder:
         state: np.ndarray,
         language: Optional[str] = None,
     ) -> dict:
-        """
-        构建观测字典。
-
-        Args:
-            images: {"camera_key": np.ndarray (H,W,3) uint8}
-            state: (state_dim,) float32 关节状态
-            language: 语言指令（可选，覆盖默认值）
-
-        Returns:
-            GR00T 观测字典
-        """
-        # 处理图像
         video = {}
         for key in self.camera_keys:
             if key in images:
@@ -59,17 +36,26 @@ class ObservationBuilder:
                 if img.shape[:2] != self.image_size:
                     img = self._resize_image(img, self.image_size)
                 video[key] = img
+            else:
+                # 缺失相机时用零张量填充并警告，避免下游维度不匹配
+                import warnings
+                warnings.warn(f"相机 '{key}' 缺失，用零张量填充")
+                video[key] = np.zeros((self.image_size[0], self.image_size[1], 3), dtype=np.uint8)
 
-        # 构建观测
-        obs = {
+        state = np.asarray(state, dtype=np.float32)
+        if state.shape[-1] != self.state_dim and self.state_dim > 0:
+            import warnings
+            warnings.warn(
+                f"state 末维 {state.shape[-1]} != state_dim {self.state_dim}，可能维度不匹配"
+            )
+
+        return {
             "video": video,
-            "state": state.astype(np.float32)[None, ...],  # (1, state_dim)
+            "state": state[None, ...],
             "language": language or self.language_instruction,
         }
-        return obs
 
     @staticmethod
     def _resize_image(img: np.ndarray, target_size: tuple = (224, 224)) -> np.ndarray:
-        """OpenCV resize"""
         import cv2
         return cv2.resize(img, (target_size[1], target_size[0]), interpolation=cv2.INTER_LINEAR)

@@ -72,6 +72,27 @@ class TestG1Config:
             lo, hi = JOINT_LIMITS[joint]
             assert lo <= value <= hi, f"{joint}: {value} not in [{lo}, {hi}]"
 
+    def test_pitch_joint_limits_mirror_left_right(self):
+        """pitch 关节左右限位应镜像（右侧 = 左侧取反）。"""
+        from src.configs.g1_config import JOINT_LIMITS
+        # hip_pitch
+        left_hip = JOINT_LIMITS["left_hip_pitch"]
+        right_hip = JOINT_LIMITS["right_hip_pitch"]
+        assert right_hip == (-left_hip[1], -left_hip[0]), \
+            f"right_hip_pitch {right_hip} 未镜像 left_hip_pitch {left_hip}"
+        # shoulder_pitch
+        left_sh = JOINT_LIMITS["left_shoulder_pitch"]
+        right_sh = JOINT_LIMITS["right_shoulder_pitch"]
+        assert right_sh == (-left_sh[1], -left_sh[0]), \
+            f"right_shoulder_pitch {right_sh} 未镜像 left_shoulder_pitch {left_sh}"
+
+    def test_roll_joint_limits_mirror_left_right(self):
+        """roll 关节左右限位应镜像。"""
+        from src.configs.g1_config import JOINT_LIMITS
+        left_hip_roll = JOINT_LIMITS["left_hip_roll"]
+        right_hip_roll = JOINT_LIMITS["right_hip_roll"]
+        assert right_hip_roll == (-left_hip_roll[1], -left_hip_roll[0])
+
 
 class TestGo2Config:
     """Go2 四足机器人配置测试。"""

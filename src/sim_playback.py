@@ -1,38 +1,4 @@
-"""
-sim_playback.py — 在 MuJoCo 仿真中回放 robot_retargeter 动作并采集训练数据。
-
-与 retarget_to_lerobot.py 的区别：
-  - retarget_to_lerobot.py: 纯运动学（解析计算状态 + 单相机渲染）
-  - sim_playback.py: 仿真回放（设置 qpos → mj_forward → 多相机渲染 + 真实 qvel）
-
-流程:
-  1. 加载 robot_retargeter 的 CSV/NPZ 运动数据
-  2. 加载 MuJoCo MJCF 模型
-  3. 逐帧设置 qpos，调用 mj_forward 获取真实 qvel
-  4. 从仿真中获取多相机图像
-  5. 构建与 collect_data.py 相同格式的 episode_*.npz + episode_*.mp4
-  6. 可选：直接转换为 LeRobot v2 格式
-
-用法:
-    # 基本用法（输出到 sim_raw/）
-    python -m src.sim_playback \
-        --motion ../robot_retargeter/output_data/robot_motion/xxx_g1.csv \
-        --robot g1 \
-        --output output/g1_sim_raw \
-        --num-episodes 5
-
-    # 直接转换为 LeRobot v2
-    python -m src.sim_playback \
-        --motion ../robot_retargeter/output_data/robot_motion/xxx_g1.csv \
-        --robot g1 \
-        --output output/g1_sim_lerobot \
-        --to-lerobot
-
-    # 指定 MJCF 模型和 FPS
-    python -m src.sim_playback \
-        --motion xxx.csv --robot g1 --output output/g1_sim \
-        --mjcf path/to/g1.xml --fps 30
-"""
+"""sim_playback.py — MuJoCo 仿真回放 + 采集训练数据。"""
 
 import argparse
 import json
@@ -43,13 +9,11 @@ from typing import Optional
 import cv2
 import numpy as np
 
-# ─── 在无头服务器上强制使用 osmesa 后端 ───
 import os
 if "DISPLAY" not in os.environ:
     os.environ.setdefault("MUJOCO_GL", "osmesa")
 
 
-# ─────────────────── 机器人配置 ───────────────────
 ROBOT_CONFIGS = {
     "g1": {
         "num_joints": 29,
@@ -90,12 +54,11 @@ ROBOT_CONFIGS = {
 }
 
 
-# ─────────────────── MJCF 模型查找 ───────────────────
 def find_robot_mjcf(robot: str) -> str:
     """自动查找机器人 MJCF 模型。"""
     search_roots = [
-        Path(__file__).resolve().parent.parent,  # gr00t_mjlab_autodl/
-        Path(__file__).resolve().parent.parent.parent,  # unitree/
+        Path(__file__).resolve().parent.parent,
+        Path(__file__).resolve().parent.parent.parent,
     ]
 
     candidates = {
@@ -137,7 +100,6 @@ def find_robot_mjcf(robot: str) -> str:
     )
 
 
-# ─────────────────── 运动学仿真回放 ───────────────────
 class SimPlayback:
     """在 MuJoCo 中回放运动数据并采集观测。"""
 
@@ -147,61 +109,48 @@ class SimPlayback:
         robot: str = "g1",
         image_size: tuple = (224, 224),
     ):
-        """
-        Args:
-            mjcf_path: MJCF 模型文件路径
-            robot: 机器人类型
-            image_size: 渲染图像尺寸 (H, W)
-        """
         import mujoco
 
         self.robot = robot
         self.image_size = image_size
         self.config = ROBOT_CONFIGS[robot]
 
-        # 加载模型
         self.model = mujoco.MjModel.from_xml_path(mjcf_path)
         self.data = mujoco.MjData(self.model)
 
-        # 创建渲染器
         self.renderer = mujoco.Renderer(
             self.model,
             height=self.image_size[0],
             width=self.image_size[1],
         )
 
-        # 获取可用相机
         self.camera_names = []
         for i in range(self.model.ncam):
             name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_CAMERA, i)
             if name:
                 self.camera_names.append(name)
 
-        # 获取关节名称（排除 free joint）
         self.joint_names = []
         for i in range(self.model.njnt):
             name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, i)
             if name:
                 jnt_type = self.model.jnt_type[i]
-                # type 0 = free joint, skip it
                 if jnt_type != 0:
                     self.joint_names.append(name)
 
-        # 获取关节 qpos 地址
         self.joint_qpos_indices = []
         self.joint_qvel_indices = []
         for i in range(self.model.njnt):
             jnt_type = self.model.jnt_type[i]
-            if jnt_type != 0:
-                # 获取该 joint 在 qpos 和 qvel 中的起始地址
+            # 只处理 hinge(3) / slide(2) 关节；跳过 free(0) / ball(1)
+            if jnt_type in (2, 3):
                 qpos_addr = self.model.jnt_qposadr[i]
-                qvel_addr = qpos_addr - 1
+                qvel_addr = self.model.jnt_qveladr[i]
                 self.joint_qpos_indices.append(qpos_addr)
                 self.joint_qvel_indices.append(qvel_addr)
 
-        # free joint 的 qpos 地址（前 7 个：pos(3) + quat(4)）
-        self.base_pos_idx = 0  # qpos[0:3]
-        self.base_quat_idx = 3  # qpos[3:7]
+        self.base_pos_idx = 0
+        self.base_quat_idx = 3
 
         print(f"  ✅ MuJoCo 仿真初始化: {Path(mjcf_path).name}")
         print(f"     图像尺寸: {self.image_size}")
@@ -209,83 +158,49 @@ class SimPlayback:
         print(f"     关节数: {len(self.joint_names)}")
 
     def step(self, base_pos: np.ndarray, base_quat: np.ndarray, joint_pos: np.ndarray):
-        """
-        设置机器人状态并执行一步前向运动学。
-
-        Args:
-            base_pos: (3,) 基座位置
-            base_quat: (4,) 基座四元数 wxyz
-            joint_pos: (N,) 关节位置
-        """
         import mujoco
 
-        # 设置基座
         self.data.qpos[self.base_pos_idx:self.base_pos_idx + 3] = base_pos
         self.data.qpos[self.base_quat_idx:self.base_quat_idx + 4] = base_quat
 
-        # 设置关节
         for i, idx in enumerate(self.joint_qpos_indices):
             if i < len(joint_pos):
                 self.data.qpos[idx] = joint_pos[i]
 
-        # 零速度
+        # kinematic 回放：清零 qvel 后 mj_forward 仅做正运动学，不积分动力学
         self.data.qvel[:] = 0.0
-
-        # 前向运动学
         mujoco.mj_forward(self.model, self.data)
 
     def get_state(self) -> np.ndarray:
-        """
-        获取当前状态向量。
-
-        Returns:
-            state: (state_dim,) 状态向量
-                [joint_pos(N), joint_vel(N), base_pos(3), base_quat(4), base_lin_vel(3), base_ang_vel(3)]
-        """
         num_joints = self.config["num_joints"]
 
-        # 关节位置
         joint_pos = np.zeros(num_joints, dtype=np.float32)
         for i, idx in enumerate(self.joint_qpos_indices):
             if i < num_joints:
                 joint_pos[i] = self.data.qpos[idx]
 
-        # 关节速度（从仿真获取）
+        # kinematic 回放下 qvel=0，joint_vel 用 qpos 差分近似
         joint_vel = np.zeros(num_joints, dtype=np.float32)
-        for i, idx in enumerate(self.joint_qpos_indices):
-            if i < num_joints:
-                # qvel 和 qpos 的索引布局相同（对于 hinge joint）
-                joint_vel[i] = self.data.qvel[self.joint_qvel_indices[i]]
 
-        # 基座状态
         base_pos = self.data.qpos[self.base_pos_idx:self.base_pos_idx + 3].astype(np.float32)
         base_quat = self.data.qpos[self.base_quat_idx:self.base_quat_idx + 4].astype(np.float32)
 
-        # 基座速度（从 free joint 的 qvel 获取）
-        base_lin_vel = self.data.qvel[0:3].astype(np.float32)
-        base_ang_vel = self.data.qvel[3:6].astype(np.float32)
+        # kinematic 回放下 base 速度为 0
+        base_lin_vel = np.zeros(3, dtype=np.float32)
+        base_ang_vel = np.zeros(3, dtype=np.float32)
 
         state = np.concatenate([
-            joint_pos,      # (N,)
-            joint_vel,      # (N,)
-            base_pos,       # (3,)
-            base_quat,      # (4,)
-            base_lin_vel,   # (3,)
-            base_ang_vel,   # (3,)
+            joint_pos,
+            joint_vel,
+            base_pos,
+            base_quat,
+            base_lin_vel,
+            base_ang_vel,
         ])
 
         return state.astype(np.float32)
 
     def render_camera(self, camera_name: Optional[str] = None) -> np.ndarray:
-        """
-        渲染指定相机的图像。
-
-        Args:
-            camera_name: 相机名称（None 则使用第一个可用相机）
-
-        Returns:
-            image: (H, W, 3) RGB 图像
-        """
         import mujoco
 
         cam = camera_name if camera_name and camera_name in self.camera_names else None
@@ -294,40 +209,19 @@ class SimPlayback:
         return img
 
     def render_all_cameras(self) -> dict:
-        """
-        渲染所有可用相机的图像。
-
-        Returns:
-            images: {"camera_name": (H, W, 3) RGB image}
-        """
         images = {}
         for cam_name in self.camera_names:
             images[cam_name] = self.render_camera(cam_name)
         return images
 
 
-# ─────────────────── 运动数据加载 ───────────────────
 def load_motion_data(motion_file: str, fps: Optional[float] = None):
-    """
-    加载 robot_retargeter 的运动数据。
-
-    Args:
-        motion_file: CSV 或 NPZ 文件路径
-        fps: 帧率（None 则使用默认值）
-
-    Returns:
-        base_pos: (T, 3) 基座位置
-        base_quat: (T, 4) 基座四元数 wxyz
-        joint_pos: (T, N) 关节位置
-        actual_fps: 帧率
-    """
     from src.retarget_motion_loader import RetargetMotionLoader
 
     loader = RetargetMotionLoader(motion_file, fps=fps)
     return loader.load()
 
 
-# ─────────────────── 数据采集 ───────────────────
 def collect_from_sim(
     motion_file: str,
     robot: str = "g1",
@@ -340,45 +234,23 @@ def collect_from_sim(
     action_mode: str = "delta",
     task_description: Optional[str] = None,
 ):
-    """
-    在仿真中回放运动并采集训练数据。
-
-    Args:
-        motion_file: robot_retargeter 的运动文件
-        robot: 机器人类型
-        output_dir: 输出目录
-        mjcf_path: MJCF 模型路径
-        num_episodes: episode 数量
-        episode_length: 每 episode 步数
-        fps: 帧率
-        image_size: 图像尺寸
-        action_mode: 动作模式
-        task_description: 任务描述
-
-    Returns:
-        stats: 采集统计信息
-    """
     import mujoco
 
     config = ROBOT_CONFIGS[robot]
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # 查找 MJCF
     if mjcf_path is None:
         mjcf_path = find_robot_mjcf(robot)
 
-    # 加载运动数据
     print(f"📂 加载运动数据: {motion_file}")
     base_pos, base_quat, joint_pos, actual_fps = load_motion_data(motion_file, fps=fps)
     T = joint_pos.shape[0]
     dt = 1.0 / actual_fps
     print(f"   帧数: {T}, FPS: {actual_fps}, 时长: {T / actual_fps:.1f}s")
 
-    # 初始化仿真
     sim = SimPlayback(mjcf_path, robot=robot, image_size=image_size)
 
-    # 推断任务描述
     if task_description is None:
         from src.configs.motion_labels import get_motion_label
         task_description = get_motion_label(motion_file)
@@ -392,8 +264,6 @@ def collect_from_sim(
     print(f"   输出: {output_path}")
     print()
 
-    # 计算每 episode 使用的运动片段长度
-    # 如果运动数据不够长，循环使用
     if T < episode_length:
         print(f"   ⚠️  运动数据 ({T} 帧) < episode 长度 ({episode_length} 帧)")
         print(f"   将循环使用运动数据")
@@ -406,18 +276,11 @@ def collect_from_sim(
 
     for ep_idx in range(num_episodes):
         ep_data = _collect_episode(
-            sim=sim,
-            base_pos=base_pos,
-            base_quat=base_quat,
-            joint_pos=joint_pos,
-            ep_idx=ep_idx,
-            output_path=output_path,
-            config=config,
-            num_joints=config["num_joints"],
-            episode_length=episode_length,
-            action_mode=action_mode,
-            actual_fps=actual_fps,
-            task_description=task_description,
+            sim=sim, base_pos=base_pos, base_quat=base_quat, joint_pos=joint_pos,
+            ep_idx=ep_idx, output_path=output_path, config=config,
+            num_joints=config["num_joints"], episode_length=episode_length,
+            action_mode=action_mode, actual_fps=actual_fps,
+            task_description=task_description, robot=robot,
         )
         stats["episodes"].append(ep_data)
         stats["total_steps"] += ep_data["steps"]
@@ -426,11 +289,7 @@ def collect_from_sim(
         avg_time = elapsed / (ep_idx + 1)
         eta = avg_time * (num_episodes - ep_idx - 1)
 
-        print(
-            f"  ✅ Episode {ep_idx + 1}/{num_episodes}  "
-            f"steps={ep_data['steps']}  "
-            f"ETA={eta:.0f}s"
-        )
+        print(f"  ✅ Episode {ep_idx + 1}/{num_episodes}  steps={ep_data['steps']}  ETA={eta:.0f}s")
 
     elapsed = time.time() - stats["start_time"]
     print(f"\n📊 采集完成")
@@ -438,59 +297,39 @@ def collect_from_sim(
     print(f"   总耗时: {elapsed:.1f}s")
     print(f"   输出目录: {output_path}")
 
-    # 保存 metadata
     _save_metadata(output_path, stats, robot, task_description, action_mode,
                     num_episodes, episode_length, actual_fps, image_size, T, motion_file)
 
     return stats
 
 
-def _collect_episode(
-    sim: "SimPlayback",
-    base_pos: np.ndarray,
-    base_quat: np.ndarray,
-    joint_pos: np.ndarray,
-    ep_idx: int,
-    output_path: Path,
-    config: dict,
-    num_joints: int,
-    episode_length: int,
-    action_mode: str,
-    actual_fps: float,
-    task_description: str,
-) -> dict:
-    """采集单个 episode。"""
+def _collect_episode(sim, base_pos, base_quat, joint_pos, ep_idx, output_path, config, num_joints, episode_length, action_mode, actual_fps, task_description, robot="unknown") -> dict:
     T = joint_pos.shape[0]
     camera_names = config["camera_names"]
 
     frames = {cam: [] for cam in camera_names}
     states = []
     actions = []
-    total_reward = 0.0
 
     for step in range(episode_length):
-        # 循环使用运动数据
         t = step % T
-
-        # 设置仿真状态
         sim.step(base_pos[t], base_quat[t], joint_pos[t])
-
-        # 获取状态
         state = sim.get_state()
 
-        # 计算动作
         if action_mode == "delta":
             t_next = (step + 1) % T
-            action = (joint_pos[t_next] - joint_pos[t]).astype(np.float32)
+            # 循环边界处（t_next 回绕到 0）delta 会大跳变，置 0 避免训练异常
+            if t_next == 0 and step >= T - 1:
+                action = np.zeros(num_joints, dtype=np.float32)
+            else:
+                action = (joint_pos[t_next] - joint_pos[t]).astype(np.float32)
         elif action_mode == "absolute":
             action = joint_pos[t].astype(np.float32)
         else:
             action = np.zeros(num_joints, dtype=np.float32)
 
-        # 渲染多相机
         images = sim.render_all_cameras()
 
-        # 保存数据
         for cam in camera_names:
             if cam in images:
                 frames[cam].append(images[cam])
@@ -499,11 +338,9 @@ def _collect_episode(
 
         states.append(state)
         actions.append(action)
-        total_reward += 0.0  # 仿真回放无 reward
 
     steps = len(states)
 
-    # 保存 npz
     npz_path = output_path / f"episode_{ep_idx:04d}.npz"
     np.savez_compressed(
         str(npz_path),
@@ -511,26 +348,19 @@ def _collect_episode(
         actions=np.stack(actions).astype(np.float32),
         rewards=np.zeros(steps, dtype=np.float32),
         task_name=task_description,
-        robot=config.get("robot", "unknown"),
+        robot=robot,
         action_mode=action_mode,
     )
 
-    # 保存 mp4（每个相机一个视频）
     for cam in camera_names:
         if frames[cam]:
             mp4_path = output_path / f"episode_{ep_idx:04d}_{cam}.mp4"
             _save_video(frames[cam], str(mp4_path), fps=actual_fps)
 
-    return {
-        "episode": ep_idx,
-        "steps": steps,
-        "reward": total_reward,
-        "npz": str(npz_path),
-    }
+    return {"episode": ep_idx, "steps": steps, "reward": 0.0, "npz": str(npz_path)}
 
 
 def _save_video(frames: list, path: str, fps: float = 30.0):
-    """保存图像序列为 mp4 视频。"""
     if not frames:
         return
 
@@ -550,7 +380,6 @@ def _save_video(frames: list, path: str, fps: float = 30.0):
 
 def _save_metadata(output_path, stats, robot, task_description, action_mode,
                    num_episodes, episode_length, fps, image_size, motion_frames, motion_file):
-    """保存采集 metadata。"""
     meta = {
         "robot": robot,
         "task": task_description,
@@ -574,42 +403,29 @@ def _save_metadata(output_path, stats, robot, task_description, action_mode,
         json.dump(meta, f, indent=2, ensure_ascii=False)
 
 
-# ─────────────────── CLI ───────────────────
 def main():
     parser = argparse.ArgumentParser(
         description="在 MuJoCo 仿真中回放 robot_retargeter 动作并采集训练数据",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--motion", type=str, help="robot_retargeter 运动文件 (CSV/NPZ)")
-
-    parser.add_argument("--robot", type=str, default="g1",
-                        choices=list(ROBOT_CONFIGS.keys()),
-                        help="机器人类型")
-    parser.add_argument("--output", type=str, required=True, help="输出目录")
-    parser.add_argument("--mjcf", type=str, default=None, help="MJCF 模型路径")
-    parser.add_argument("--num-episodes", type=int, default=5, help="采集 episode 数量")
-    parser.add_argument("--episode-length", type=int, default=300, help="每 episode 步数")
-    parser.add_argument("--fps", type=float, default=None, help="帧率")
-    parser.add_argument("--image-size", type=int, nargs=2, default=[224, 224],
-                        help="图像尺寸 H W")
-    parser.add_argument("--action-mode", type=str, default="delta",
-                        choices=["absolute", "delta"], help="动作模式")
-    parser.add_argument("--task", type=str, default=None, help="任务描述")
+    parser.add_argument("--motion", type=str, required=True, help="robot_retargeter 运动文件 (CSV/NPZ)")
+    parser.add_argument("--robot", type=str, default="g1", choices=list(ROBOT_CONFIGS.keys()))
+    parser.add_argument("--output", type=str, required=True)
+    parser.add_argument("--mjcf", type=str, default=None)
+    parser.add_argument("--num-episodes", type=int, default=5)
+    parser.add_argument("--episode-length", type=int, default=300)
+    parser.add_argument("--fps", type=float, default=None)
+    parser.add_argument("--image-size", type=int, nargs=2, default=[224, 224])
+    parser.add_argument("--action-mode", type=str, default="delta", choices=["absolute", "delta"])
+    parser.add_argument("--task", type=str, default=None)
 
     args = parser.parse_args()
 
     collect_from_sim(
-        motion_file=args.motion,
-        robot=args.robot,
-        output_dir=args.output,
-        mjcf_path=args.mjcf,
-        num_episodes=args.num_episodes,
-        episode_length=args.episode_length,
-        fps=args.fps,
-        image_size=tuple(args.image_size),
-        action_mode=args.action_mode,
+        motion_file=args.motion, robot=args.robot, output_dir=args.output,
+        mjcf_path=args.mjcf, num_episodes=args.num_episodes,
+        episode_length=args.episode_length, fps=args.fps,
+        image_size=tuple(args.image_size), action_mode=args.action_mode,
         task_description=args.task,
     )
 

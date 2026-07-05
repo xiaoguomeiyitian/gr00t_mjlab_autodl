@@ -24,14 +24,12 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# ─── 自动检测 Python（优先 .venv）───
 if [ -f "$SCRIPT_DIR/.venv/bin/python" ]; then
     PYTHON="$SCRIPT_DIR/.venv/bin/python"
 else
     PYTHON="python3"
 fi
 
-# ─── 颜色 ───
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -39,7 +37,6 @@ CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 NC='\033[0m'
 
-# ─── 菜单 ───
 show_menu() {
     echo ""
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════╗${NC}"
@@ -72,7 +69,6 @@ show_menu() {
     echo ""
 }
 
-# ─── 机器人选择 ───
 ROBOT_CHOICES=("g1" "h1" "h1_with_hand" "h1_2" "h2" "go2")
 select_robot() {
     echo ""
@@ -89,17 +85,13 @@ select_robot() {
     echo "  → 已选择: $robot"
 }
 
-# ─── 默认参数 ───
 get_defaults() {
     MODEL_PATH="nvidia/GR00T-N1.7-3B"
     EMBODIMENT_TAG="OXE_DROID_RELATIVE_EEF_RELATIVE_JOINT"
     PORT=5555
     HOST="127.0.0.1"
-    DATASET_PATH="$SCRIPT_DIR/../Isaac-GR00T/demo_data/droid_sample"
-    OUTPUT_DIR="$SCRIPT_DIR/../output"
 }
 
-# ─── 执行函数 ───
 run_init() {
     echo -e "${GREEN}🚀 云端环境初始化...${NC}"
     echo ""
@@ -227,17 +219,19 @@ run_viser_infer() {
     local host="${2:-127.0.0.1}"
     local port="${3:-5555}"
     local viser_port="${4:-20006}"
+    local dataset_path="${5:-$SCRIPT_DIR/output/${robot}_lerobot}"
     echo -e "${GREEN}🌐 Viser + Policy Server 推理可视化 (${robot})...${NC}"
     echo ""
     echo "   Policy Server: ${host}:${port}"
     echo "   Viser 端口: ${viser_port}"
+    echo "   数据集: ${dataset_path}"
     echo ""
     $PYTHON -m src.viz.viser_infer \
         --robot "$robot" \
         --host "$host" \
         --port "$port" \
         --viser-port "$viser_port" \
-        --dataset "$DATASET_PATH" \
+        --dataset "$dataset_path" \
         --embodiment-tag "$EMBODIMENT_TAG"
 }
 
@@ -245,15 +239,17 @@ run_mujoco_infer() {
     local robot="${1:-g1}"
     local host="${2:-127.0.0.1}"
     local port="${3:-5555}"
+    local dataset_path="${4:-$SCRIPT_DIR/output/${robot}_lerobot}"
     echo -e "${GREEN}🖥️  MuJoCo + Policy Server 推理可视化 (${robot})...${NC}"
     echo ""
     echo "   Policy Server: ${host}:${port}"
+    echo "   数据集: ${dataset_path}"
     echo ""
     $PYTHON -m src.viz.mujoco_infer \
         --robot "$robot" \
         --host "$host" \
         --port "$port" \
-        --dataset "$DATASET_PATH" \
+        --dataset "$dataset_path" \
         --embodiment-tag "$EMBODIMENT_TAG"
 }
 

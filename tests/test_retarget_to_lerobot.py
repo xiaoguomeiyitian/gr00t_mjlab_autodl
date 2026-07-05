@@ -35,9 +35,10 @@ from src.configs.motion_labels import get_motion_label, LABEL_MAP
 
 @pytest.fixture
 def sample_csv_file():
-    """创建临时 CSV 文件（robot_retargeter qpos 格式）。"""
+    """创建临时 CSV 文件（robot_retargeter qpos 格式，含表头）。"""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
         # 格式：[pos_x, pos_y, pos_z, quat_x, quat_y, quat_z, quat_w, joint_0..joint_28]
+        f.write("pos_x, pos_y, pos_z, quat_x, quat_y, quat_z, quat_w, " + ", ".join(f"j{i}" for i in range(29)) + "\n")
         T = 100
         for t in range(T):
             pos = [0.0, 0.0, 0.8]
@@ -118,6 +119,109 @@ class TestRetargetMotionLoader:
         with tempfile.NamedTemporaryFile(suffix=".txt") as f:
             with pytest.raises(ValueError, match="不支持的文件格式"):
                 RetargetMotionLoader(f.name).load()
+
+    def test_invalid_quat_order(self):
+        """无效 quat_order 应抛 ValueError。"""
+        with tempfile.NamedTemporaryFile(suffix=".csv") as f:
+            with pytest.raises(ValueError, match="quat_order"):
+                RetargetMotionLoader(f.name, quat_order="invalid")
+
+    def test_zero_quaternion_normalized(self):
+        """全零四元数应归一化为 [1,0,0,0]。"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+            f.write("x,y,z,qx,qy,qz,qw,j0\n")
+            f.write("0,0,0.8,0,0,0,0,0.1\n")  # 全零四元数
+            f.write("0,0,0.8,0,0,0,1,0.2\n")  # 正常四元数
+            f.flush()
+            fname = f.name
+        try:
+            loader = RetargetMotionLoader(fname, fps=30.0)
+            _, base_quat, _, _ = loader.load()
+            # 全零四元数应归一化为 [1,0,0,0]
+            np.testing.assert_allclose(base_quat[0], [1.0, 0.0, 0.0, 0.0], atol=1e-6)
+            # 正常四元数 [0,0,0,1] (xyzw) → [1,0,0,0] (wxyz)
+            np.testing.assert_allclose(base_quat[1], [1.0, 0.0, 0.0, 0.0], atol=1e-6)
+        finally:
+            os.unlink(fname)
+
+    def test_npz_without_body_pos(self):
+        """NPZ 无 body_pos_w/body_quat_w 时用默认 base（z=0.8, quat=[1,0,0,0]）。"""
+        with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as f:
+            T = 10
+            np.savez(f, joint_pos=np.random.randn(T, 29).astype(np.float32), fps=np.array([30.0]))
+            f.flush()
+            fname = f.name
+        try:
+            loader = RetargetMotionLoader(fname)
+            base_pos, base_quat, _, fps = loader.load()
+            assert base_pos.shape == (T, 3)
+            np.testing.assert_allclose(base_pos[:, 2], 0.8, atol=1e-6)
+            np.testing.assert_allclose(base_quat[:, 0], 1.0, atol=1e-6)
+            assert fps == 30.0
+        finally:
+            os.unlink(fname)
+
+    def test_npz_body_pos_w_ndim_assertion(self):
+        """body_pos_w ndim != 3 应抛 AssertionError。"""
+        with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as f:
+            np.savez(f,
+                     joint_pos=np.random.randn(10, 29).astype(np.float32),
+                     body_pos_w=np.random.randn(10, 3).astype(np.float32),  # ndim=2 错误
+                     body_quat_w=np.random.randn(10, 14, 4).astype(np.float32),
+                     fps=np.array([30.0]))
+            f.flush()
+            fname = f.name
+        try:
+            loader = RetargetMotionLoader(fname)
+            with pytest.raises(AssertionError, match="body_pos_w"):
+                loader.load()
+        finally:
+            os.unlink(fname)
+
+    def test_npz_fps_scalar(self):
+        """NPZ fps 为 0-d 标量数组也能解析。"""
+        with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as f:
+            np.savez(f,
+                     joint_pos=np.random.randn(5, 29).astype(np.float32),
+                     fps=np.array(30.0))  # 0-d
+            f.flush()
+            fname = f.name
+        try:
+            loader = RetargetMotionLoader(fname)
+            _, _, _, fps = loader.load()
+            assert fps == 30.0
+        finally:
+            os.unlink(fname)
+
+    def test_load_motion_function(self):
+        """load_motion 顶层函数委托。"""
+        from src.retarget_motion_loader import load_motion
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+            f.write("x,y,z,qx,qy,qz,qw,j0\n")
+            f.write("0,0,0.8,0,0,0,1,0.1\n")
+            f.flush()
+            fname = f.name
+        try:
+            base_pos, base_quat, joint_pos, fps = load_motion(fname, fps=30.0)
+            assert base_pos.shape == (1, 3)
+            assert joint_pos.shape == (1, 1)
+        finally:
+            os.unlink(fname)
+
+    def test_csv_1d_motion(self):
+        """单行 CSV（1-d）应被扩展为 (1, N)。"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+            f.write("x,y,z,qx,qy,qz,qw,j0\n")
+            f.write("0,0,0.8,0,0,0,1,0.1\n")
+            f.flush()
+            fname = f.name
+        try:
+            loader = RetargetMotionLoader(fname, fps=30.0)
+            base_pos, _, joint_pos, _ = loader.load()
+            assert base_pos.shape == (1, 3)
+            assert joint_pos.shape == (1, 1)
+        finally:
+            os.unlink(fname)
 
 
 # ─── Tests: compute_state_vector ───
@@ -304,7 +408,7 @@ class TestConvertToLeRobot:
         with open(os.path.join(output_dir, "meta", "info.json")) as f:
             info = json.load(f)
         assert info["robot_type"] == "g1"
-        assert info["total_episodes"] > 0
+        assert info["num_episodes"] > 0
         assert info["fps"] == 30.0
 
         # 检查 modality.json
@@ -339,7 +443,7 @@ class TestConvertToLeRobot:
         assert os.path.exists(os.path.join(output_dir, "meta", "info.json"))
         with open(os.path.join(output_dir, "meta", "info.json")) as f:
             info = json.load(f)
-        assert info["total_episodes"] > 0
+        assert info["num_episodes"] > 0
 
     def test_auto_task_label(self, sample_csv_file, temp_output_dir):
         """测试自动推断任务标签。"""

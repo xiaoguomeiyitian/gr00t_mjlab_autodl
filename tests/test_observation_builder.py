@@ -61,13 +61,16 @@ class TestObservationBuilder:
         assert obs["language"] == "default task"
 
     def test_build_missing_camera(self):
-        """缺失相机时跳过。"""
+        """缺失相机时用零张量填充并警告。"""
         builder = ObservationBuilder(camera_keys=["front", "wrist"])
         images = {"front": np.zeros((224, 224, 3), dtype=np.uint8)}
         state = np.zeros(71, dtype=np.float32)
-        obs = builder.build(images, state)
+        with pytest.warns(UserWarning, match="缺失"):
+            obs = builder.build(images, state)
         assert "front" in obs["video"]
-        # wrist 不存在，不应报错
+        # wrist 缺失，用零张量填充
+        assert "wrist" in obs["video"]
+        assert obs["video"]["wrist"].shape == (224, 224, 3)
 
     def test_build_image_resize(self):
         """测试图像 resize。"""

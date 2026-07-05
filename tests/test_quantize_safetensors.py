@@ -103,3 +103,117 @@ class TestQuantizeToNF4:
         weight = np.random.randn(1024, 1024).astype(np.float32)
         quantized, absmax = quantize_to_nf4(weight)
         assert quantized.shape == (1024, 512)
+
+
+class TestDequantizeRoundTrip:
+    """反量化 + round-trip 测试。"""
+
+    def test_round_trip_shape(self):
+        """反量化后形状与原始一致。"""
+        from src.quantize_safetensors import dequantize_from_nf4
+        weight = np.random.randn(64, 128).astype(np.float32)
+        packed, absmax = quantize_to_nf4(weight)
+        deq = dequantize_from_nf4(packed, absmax, weight.shape)
+        assert deq.shape == weight.shape
+
+    def test_round_trip_mse(self):
+        """round-trip 量化误差合理（MSE 应远小于原始方差）。"""
+        from src.quantize_safetensors import dequantize_from_nf4
+        np.random.seed(42)
+        weight = np.random.randn(256, 512).astype(np.float32)
+        packed, absmax = quantize_to_nf4(weight)
+        deq = dequantize_from_nf4(packed, absmax, weight.shape)
+        mse = np.mean((weight - deq) ** 2)
+        var = np.var(weight)
+        # 量化误差应远小于原始方差
+        assert mse < var * 0.1, f"MSE={mse}, var={var}"
+
+    def test_round_trip_odd_columns(self):
+        """奇数列 round-trip（测试 padding 分支）。"""
+        from src.quantize_safetensors import dequantize_from_nf4
+        weight = np.random.randn(32, 65).astype(np.float32)  # 奇数列
+        packed, absmax = quantize_to_nf4(weight)
+        deq = dequantize_from_nf4(packed, absmax, weight.shape)
+        assert deq.shape == (32, 65)
+        mse = np.mean((weight - deq) ** 2)
+        var = np.var(weight)
+        assert mse < var * 0.1
+
+    def test_round_trip_small_block(self):
+        """列数 < BLOCK_SIZE 的边界（单块）。"""
+        from src.quantize_safetensors import dequantize_from_nf4
+        weight = np.random.randn(8, 1).astype(np.float32)  # 1 列
+        packed, absmax = quantize_to_nf4(weight)
+        deq = dequantize_from_nf4(packed, absmax, weight.shape)
+        assert deq.shape == (8, 1)
+
+    def test_round_trip_63_columns(self):
+        """列数略小于 BLOCK_SIZE。"""
+        from src.quantize_safetensors import dequantize_from_nf4
+        weight = np.random.randn(16, 63).astype(np.float32)
+        packed, absmax = quantize_to_nf4(weight)
+        deq = dequantize_from_nf4(packed, absmax, weight.shape)
+        assert deq.shape == (16, 63)
+
+    def test_round_trip_zero_weight(self):
+        """全零权重 round-trip。"""
+        from src.quantize_safetensors import dequantize_from_nf4
+        weight = np.zeros((32, 64), dtype=np.float32)
+        packed, absmax = quantize_to_nf4(weight)
+        deq = dequantize_from_nf4(packed, absmax, weight.shape)
+        # 全零权重反量化后应接近 0
+        assert np.max(np.abs(deq)) < 1e-5
+
+    def test_packed_nibble_range(self):
+        """packed 值每个 nibble 在 0-15 范围内。"""
+        weight = np.random.randn(64, 128).astype(np.float32)
+        packed, _ = quantize_to_nf4(weight)
+        # 低 nibble
+        assert np.all((packed & 0x0F) >= 0)
+        assert np.all((packed & 0x0F) <= 15)
+        # 高 nibble
+        assert np.all((packed >> 4) >= 0)
+        assert np.all((packed >> 4) <= 15)
+
+    def test_absmax_correctness(self):
+        """absmax 等于块内真实最大绝对值。"""
+        weight = np.abs(np.random.randn(4, 128).astype(np.float32))
+        # 构造已知 absmax：每块设为不同量级
+        weight[:, :64] *= 10
+        weight[:, 64:128] *= 0.1
+        _, absmax = quantize_to_nf4(weight)
+        # 块 0 的 absmax 应接近 10，块 1 接近 0.1
+        assert absmax[0, 0] > 5  # 块 0
+        assert absmax[0, 1] < 1  # 块 1
+
+
+class TestQuantizeSafetensorsFile:
+    """quantize_safetensors_file 文件级测试。"""
+
+    def test_file_level_quantize(self, temp_dir):
+        """文件级量化：跳过 1D，量化 2D。"""
+        from src.quantize_safetensors import quantize_safetensors_file
+        from safetensors.numpy import save_file, safe_open
+
+        model_path = temp_dir / "model.safetensors"
+        weights = {
+            "linear.weight": np.random.randn(64, 128).astype(np.float32),
+            "linear.bias": np.random.randn(64).astype(np.float32),  # 1D 跳过
+        }
+        save_file(weights, str(model_path))
+
+        out_path = temp_dir / "model_int4.safetensors"
+        stats = quantize_safetensors_file(str(model_path), str(out_path), verbose=False)
+
+        assert stats["total_tensors"] == 2
+        assert stats["quantized_tensors"] == 1
+        assert stats["skipped_tensors"] == 1
+        assert out_path.exists()
+
+        # 验证输出 key 命名
+        with safe_open(str(out_path), framework="numpy") as f:
+            keys = list(f.keys())
+        assert "linear.weight.quant" in keys
+        assert "linear.weight.absmax" in keys
+        assert "linear.weight.shape" in keys
+        assert "linear.bias" in keys  # 跳过的原样保留

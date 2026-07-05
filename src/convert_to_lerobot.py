@@ -1,22 +1,4 @@
-"""
-convert_to_lerobot.py — 将原始采集数据转换为 GR00T LeRobot v2 格式。
-
-输入：{robot}_raw/ 目录（episode_*.npz + episode_*.mp4）
-输出：{robot}_lerobot/ 目录（标准 LeRobot v2 格式）
-
-LeRobot v2 结构：
-    dataset/
-    ├── meta/
-    │   ├── info.json           # 数据集元信息
-    │   ├── episodes.jsonl      # episode 索引
-    │   ├── tasks.jsonl         # 语言任务描述
-    │   └── modality.json       # GR00T 模态配置
-    ├── data/chunk-000/         # parquet（state + action）
-    └── videos/chunk-000/       # mp4 视频
-
-用法:
-    python -m src.convert_to_lerobot --input-dir g1_raw --output-dir g1_lerobot --robot g1
-"""
+"""convert_to_lerobot.py — 原始采集数据 → LeRobot v2 格式。"""
 
 import argparse
 import json
@@ -35,23 +17,12 @@ def convert_to_lerobot(
     task_description: str = "perform the locomotion task",
     fps: int = 30,
 ):
-    """
-    将原始 npz+mp4 数据转换为 LeRobot v2 格式。
-
-    Args:
-        input_dir: 原始数据目录（含 episode_*.npz + episode_*.mp4）
-        output_dir: 输出 LeRobot v2 数据集目录
-        robot: 机器人类型
-        task_description: 语言任务描述
-        fps: 帧率
-    """
     input_path = Path(input_dir)
     output_path = Path(output_dir)
 
     if not input_path.exists():
         raise FileNotFoundError(f"输入目录不存在: {input_path}")
 
-    # 读取采集 metadata
     meta_file = input_path / "collection_meta.json"
     if meta_file.exists():
         with open(meta_file) as f:
@@ -73,20 +44,35 @@ def convert_to_lerobot(
     num_joints = collection_meta.get("num_joints", defaults["num_joints"])
     camera_names = collection_meta.get("camera_names", defaults["camera_names"])
 
-    # 收集所有 episode 文件
     npz_files = sorted(input_path.glob("episode_*.npz"))
-    mp4_files = sorted(input_path.glob("episode_*.mp4"))
+    # mp4 可能是单相机 (episode_000000.mp4) 或多相机 (episode_000000_front.mp4)
+    all_mp4_files = sorted(input_path.glob("episode_*.mp4"))
 
     if not npz_files:
         raise FileNotFoundError(f"未找到 episode_*.npz 文件: {input_path}")
+
+    # 按 episode 索引分组 mp4
+    def _episode_idx_from_name(name: str) -> int:
+        # episode_000000.mp4 / episode_000000_front.mp4 → 0
+        stem = Path(name).stem
+        parts = stem.split("_")
+        try:
+            return int(parts[1])
+        except (IndexError, ValueError):
+            return -1
+
+    mp4_by_ep = {}
+    for mp4 in all_mp4_files:
+        ep_idx = _episode_idx_from_name(mp4.name)
+        if ep_idx < 0:
+            continue
+        mp4_by_ep.setdefault(ep_idx, []).append(mp4)
 
     print(f"📦 转换为 LeRobot v2 格式")
     print(f"   输入: {input_path} ({len(npz_files)} episodes)")
     print(f"   输出: {output_path}")
     print(f"   机器人: {robot}")
-    print(f"   State dim: {state_dim}, Action dim: {action_dim}")
 
-    # 创建目录结构
     meta_dir = output_path / "meta"
     data_dir = output_path / "data" / "chunk-000"
     videos_dir = output_path / "videos" / "chunk-000"
@@ -94,16 +80,13 @@ def convert_to_lerobot(
     data_dir.mkdir(parents=True, exist_ok=True)
     videos_dir.mkdir(parents=True, exist_ok=True)
 
-    # ─── 1. 写入 modality.json ───
     modality = _build_modality_json(robot, num_joints, state_dim, camera_names)
     with open(meta_dir / "modality.json", "w") as f:
         json.dump(modality, f, indent=2)
 
-    # ─── 2. 写入 tasks.jsonl ───
     with open(meta_dir / "tasks.jsonl", "w") as f:
         f.write(json.dumps({"task_index": 0, "task_description": task_description}) + "\n")
 
-    # ─── 3. 处理每个 episode ───
     all_rows = []
     episodes_info = []
     video_count = 0
@@ -111,28 +94,35 @@ def convert_to_lerobot(
 
     for ep_idx, npz_file in enumerate(npz_files):
         data = np.load(str(npz_file))
-        states = data["states"]      # (T, state_dim)
-        actions = data["actions"]    # (T, action_dim)
+        states = data["states"]
+        actions = data["actions"]
         rewards = data.get("rewards", np.zeros(len(states)))
         ep_steps = len(states)
 
-        episodes_info.append({
-            "episode_index": ep_idx,
-            "length": ep_steps,
-            "task_index": 0,
-        })
+        episodes_info.append({"episode_index": ep_idx, "length": ep_steps, "task_index": 0})
 
-        # 复制视频
-        mp4_file = mp4_files[ep_idx] if ep_idx < len(mp4_files) else None
-        video_name = f"episode_{ep_idx:06d}.mp4"
-        if mp4_file and mp4_file.exists():
-            shutil.copy2(str(mp4_file), str(videos_dir / video_name))
-            video_count += 1
-        else:
-            # 生成占位视频
-            _create_placeholder_video(str(videos_dir / video_name), ep_steps, fps, camera_names)
+        # 按 episode 索引显式查找 mp4，避免 sorted 索引错配
+        ep_mp4s = mp4_by_ep.get(ep_idx, [])
+        # 优先匹配带相机后缀的；若无则用单文件
+        for cam in camera_names:
+            video_name = f"episode_{ep_idx:06d}_{cam}.mp4"
+            target = videos_dir / video_name
+            # 找匹配该相机的 mp4
+            cam_mp4 = next((m for m in ep_mp4s if m.stem.endswith(f"_{cam}")), None)
+            if cam_mp4 and cam_mp4.exists():
+                shutil.copy2(str(cam_mp4), str(target))
+                video_count += 1
+            elif ep_mp4s and cam == camera_names[0]:
+                # 第一个相机回退到无后缀单文件
+                single = next((m for m in ep_mp4s if "_" not in m.stem.split("episode_")[1]), None)
+                if single and single.exists():
+                    shutil.copy2(str(single), str(target))
+                    video_count += 1
+                else:
+                    _create_placeholder_video(str(target), ep_steps, fps, camera_names)
+            else:
+                _create_placeholder_video(str(target), ep_steps, fps, camera_names)
 
-        # 构建 parquet 行
         for step in range(ep_steps):
             row = {
                 "observation.state": states[step].tolist(),
@@ -151,18 +141,15 @@ def convert_to_lerobot(
         if (ep_idx + 1) % 10 == 0 or ep_idx == len(npz_files) - 1:
             print(f"  ✅ Episode {ep_idx + 1}/{len(npz_files)}  steps={ep_steps}")
 
-    # ─── 4. 写入 parquet ───
     df = pd.DataFrame(all_rows)
     parquet_path = data_dir / "episode_000000.parquet"
     df.to_parquet(str(parquet_path), index=False)
     print(f"  📄 Parquet: {len(df)} rows → {parquet_path}")
 
-    # ─── 5. 写入 episodes.jsonl ───
     with open(meta_dir / "episodes.jsonl", "w") as f:
         for ep_info in episodes_info:
             f.write(json.dumps(ep_info) + "\n")
 
-    # ─── 6. 写入 info.json ───
     total_steps = sum(ep["length"] for ep in episodes_info)
     info = {
         "codebase_version": "v2.1",
@@ -171,6 +158,10 @@ def convert_to_lerobot(
         "total_frames": total_steps,
         "fps": fps,
         "rejected": False,
+        # 维度信息：lerobot_loader 依赖这两个字段读取 state/action 维度
+        "state_dim": state_dim,
+        "action_dim": action_dim,
+        "num_joints": num_joints,
     }
     with open(meta_dir / "info.json", "w") as f:
         json.dump(info, f, indent=2)
@@ -183,8 +174,6 @@ def convert_to_lerobot(
 
 
 def _build_modality_json(robot: str, num_joints: int, state_dim: int, camera_names: list) -> dict:
-    """构建 modality.json（GR00T 特有的模态映射）。"""
-    # State 切片
     slices = {
         "joint_pos": {"start": 0, "end": num_joints},
         "joint_vel": {"start": num_joints, "end": 2 * num_joints},
@@ -195,12 +184,8 @@ def _build_modality_json(robot: str, num_joints: int, state_dim: int, camera_nam
         slices[key] = {"start": offset, "end": offset + dim}
         offset += dim
 
-    # Action 切片
-    action_slices = {
-        "joint_position_delta": {"start": 0, "end": num_joints},
-    }
+    action_slices = {"joint_position_delta": {"start": 0, "end": num_joints}}
 
-    # Video
     video = {}
     for cam_name in camera_names:
         video[cam_name] = {"original_key": f"observation.images.{cam_name}"}
@@ -209,20 +194,16 @@ def _build_modality_json(robot: str, num_joints: int, state_dim: int, camera_nam
         "state": slices,
         "action": action_slices,
         "video": video,
-        "annotation": {
-            "human.task_description": {"original_key": "task_index"},
-        },
+        "annotation": {"human.task_description": {"original_key": "task_index"}},
     }
 
 
 def _create_placeholder_video(path: str, num_frames: int, fps: int, camera_names: list):
-    """生成占位 mp4 视频。"""
     h, w = 224, 224
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(path, fourcc, fps, (w, h))
 
     for i in range(num_frames):
-        # 黑底 + 白色帧号文字
         frame = np.zeros((h, w, 3), dtype=np.uint8)
         text = f"F{i}"
         cv2.putText(frame, text, (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
@@ -231,28 +212,19 @@ def _create_placeholder_video(path: str, num_frames: int, fps: int, camera_names
     writer.release()
 
 
-# ─────────────────── CLI ───────────────────
 def main():
     parser = argparse.ArgumentParser(description="将原始数据转换为 LeRobot v2 格式")
-    parser.add_argument("--input-dir", type=str, required=True,
-                        help="原始数据目录（含 episode_*.npz + episode_*.mp4）")
-    parser.add_argument("--output-dir", type=str, required=True,
-                        help="输出 LeRobot v2 数据集目录")
+    parser.add_argument("--input-dir", type=str, required=True)
+    parser.add_argument("--output-dir", type=str, required=True)
     parser.add_argument("--robot", type=str, default="g1",
-                        choices=["g1", "h1", "h1_with_hand", "h1_2", "h2", "go2"],
-                        help="机器人类型")
-    parser.add_argument("--task-description", type=str, default="perform the locomotion task",
-                        help="语言任务描述")
-    parser.add_argument("--fps", type=int, default=30,
-                        help="帧率")
+                        choices=["g1", "h1", "h1_with_hand", "h1_2", "h2", "go2"])
+    parser.add_argument("--task-description", type=str, default="perform the locomotion task")
+    parser.add_argument("--fps", type=int, default=30)
     args = parser.parse_args()
 
     convert_to_lerobot(
-        input_dir=args.input_dir,
-        output_dir=args.output_dir,
-        robot=args.robot,
-        task_description=args.task_description,
-        fps=args.fps,
+        input_dir=args.input_dir, output_dir=args.output_dir,
+        robot=args.robot, task_description=args.task_description, fps=args.fps,
     )
 
 

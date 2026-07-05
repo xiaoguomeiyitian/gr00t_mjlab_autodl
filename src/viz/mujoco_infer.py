@@ -5,7 +5,6 @@ mujoco_infer.py — MuJoCo 桌面窗口 + Policy Server 实时推理。
 
 用法:
     python -m src.viz.mujoco_infer --robot g1 --host 127.0.0.1 --port 5555
-    python -m src.viz.mujoco_infer --robot h1 --dataset ../Isaac-GR00T/demo_data/droid_sample
 
 依赖: pip install mujoco glfw msgpack msgpack-numpy pyzmq
 """
@@ -47,7 +46,8 @@ class MuJoCoViewer:
         print("⚠️  MuJoCo 窗口需要桌面环境，当前仅测试推理连接")
         # 简化：只跑几步推理测试
         import time
-        state = None
+        # 首次 state 不能为 None，否则 obs_builder.build 会 AttributeError
+        state = np.zeros(71, dtype=np.float32)
         for i in range(10):
             action = policy_fn(state)
             print(f"   Step {i}: action shape={action.shape}, range=[{action.min():.3f}, {action.max():.3f}]")
@@ -64,7 +64,7 @@ class MuJoCoInferLoop:
         port: int = 5555,
         mjcf_path: Optional[str] = None,
         dataset_path: Optional[str] = None,
-        embodiment_tag: str = "OXE_DROID_RELATIVE_EEF_RELATIVE_JOINT",
+        embodiment_tag: str = "NEW_EMBODIMENT",
         traj_id: int = 1,
         fps: int = 30,
     ):
@@ -91,7 +91,18 @@ class MuJoCoInferLoop:
 
         # 获取 modality config
         modality_config = self.client.get_modality_config()
-        video_keys = list(modality_config.get("video", {}).keys()) if isinstance(modality_config, dict) else ["exterior_image_1_left"]
+        # modality_config 反序列化后是嵌套 dict，相机名在 ["video"]["modality_keys"]
+        video_keys = ["exterior_image_1_left"]
+        if isinstance(modality_config, dict):
+            video_cfg = modality_config.get("video", {})
+            if isinstance(video_cfg, dict):
+                mk = video_cfg.get("modality_keys")
+                if isinstance(mk, list) and mk:
+                    video_keys = mk
+            else:
+                mk = getattr(video_cfg, "modality_keys", None)
+                if mk:
+                    video_keys = list(mk)
         self.obs_builder = ObservationBuilder(camera_keys=video_keys)
 
         # 加载数据集（如果提供）
@@ -104,32 +115,60 @@ class MuJoCoInferLoop:
 
     def _get_initial_state(self) -> tuple:
         """获取初始状态和图像。"""
+        from src.configs.g1_config import STATE_DIM as G1_STATE_DIM
+        from src.configs.go2_config import STATE_DIM as GO2_STATE_DIM
+        _state_dim_map = {"g1": G1_STATE_DIM, "go2": GO2_STATE_DIM}
+        state_dim = _state_dim_map.get(self.robot, 71)
+
         if self.dataset and self.traj_id < len(self.dataset):
             traj = self.dataset[self.traj_id]
             step = 0
 
-            # 提取图像
+            # 提取图像：用 obs_builder 的 camera_keys
             images = {}
-            for key in ["exterior_image_1_left", "wrist_image_left"]:
-                if key in traj.columns:
-                    img = traj[key].iloc[step]
-                    if not isinstance(img, np.ndarray):
-                        img = np.array(img)
-                    images[key] = img
+            cam_keys = self.obs_builder.camera_keys if self.obs_builder else []
+            for key in cam_keys:
+                col_candidates = [key, f"observation.images.{key}"]
+                for col in col_candidates:
+                    if col in traj.columns:
+                        img = traj[col].iloc[step]
+                        if not isinstance(img, np.ndarray):
+                            img = np.array(img)
+                        images[key] = img
+                        break
 
-            # 提取状态
-            state_cols = [c for c in traj.columns if c.startswith("state.")]
-            if state_cols:
-                state = np.vstack([traj[c].iloc[step] for c in state_cols]).flatten().astype(np.float32)
+            # 提取状态：LeRobot v2 单列 observation.state
+            if "observation.state" in traj.columns:
+                state = np.atleast_1d(np.array(traj["observation.state"].iloc[step], dtype=np.float32))
             else:
-                state = np.zeros(17, dtype=np.float32)
+                state = np.zeros(state_dim, dtype=np.float32)
 
             return images, state
         else:
-            # 默认空状态
-            images = {"exterior_image_1_left": np.zeros((224, 224, 3), dtype=np.uint8)}
-            state = np.zeros(17, dtype=np.float32)
+            cam_keys = self.obs_builder.camera_keys if self.obs_builder else ["front"]
+            images = {k: np.zeros((224, 224, 3), dtype=np.uint8) for k in cam_keys}
+            state = np.zeros(state_dim, dtype=np.float32)
             return images, state
+
+    def _extract_action_vector(self, action_result) -> np.ndarray:
+        """从推理结果提取单步动作向量 (action_dim,)。"""
+        if isinstance(action_result, (tuple, list)) and len(action_result) == 2:
+            action_result = action_result[0]
+        if isinstance(action_result, dict):
+            for key in ["joint_position_delta", "joint_position", "action"]:
+                if key in action_result:
+                    arr = np.asarray(action_result[key], dtype=np.float32)
+                    return self._squeeze_action(arr)
+            arr = np.asarray(list(action_result.values())[0], dtype=np.float32)
+            return self._squeeze_action(arr)
+        arr = np.asarray(action_result, dtype=np.float32)
+        return self._squeeze_action(arr)
+
+    @staticmethod
+    def _squeeze_action(arr: np.ndarray) -> np.ndarray:
+        while arr.ndim > 1:
+            arr = arr[0]
+        return arr
 
     def run(self):
         """运行推理可视化循环。"""
@@ -140,19 +179,27 @@ class MuJoCoInferLoop:
         print(f"   空格 = 暂停/继续 | Esc = 退出")
 
         step = 0
-        paused = False
 
         def policy_fn(current_state):
             nonlocal step, state
+            # current_state 可能为 None（首次），用 self.state
+            cur = state if current_state is None else current_state
             # 构建观测
             obs = self.obs_builder.build(
                 images=images,
-                state=state,
+                state=cur,
             )
             # 推理
-            action, info = self.client.get_action(obs)
-            # 更新状态
-            state = action[:len(state)]
+            action_result, info = self.client.get_action(obs)
+            # 从 action dict 提取单步动作向量
+            action = self._extract_action_vector(action_result)
+            # 更新状态：action 是 joint_position_delta，仅累加到 joint_pos 切片
+            num_joints = len(action)
+            if len(state) >= num_joints:
+                state = state.copy()
+                state[:num_joints] = state[:num_joints] + action
+            else:
+                state = np.atleast_1d(np.array(action, dtype=np.float32))
             step += 1
             return action
 
@@ -161,7 +208,8 @@ class MuJoCoInferLoop:
         except KeyboardInterrupt:
             print(f"\n🔒 MuJoCo 推理可视化已停止 ({step} 步)")
         finally:
-            self.client.close()
+            if self.client is not None:
+                self.client.close()
 
 
 def main():
@@ -178,8 +226,8 @@ def main():
     parser.add_argument("--dataset", type=str, default=None,
                         help="数据集路径（用于获取初始观测）")
     parser.add_argument("--embodiment-tag", type=str,
-                        default="OXE_DROID_RELATIVE_EEF_RELATIVE_JOINT",
-                        help="具身标签")
+                        default="NEW_EMBODIMENT",
+                        help="具身标签（微调模型用 NEW_EMBODIMENT，预训练用 OXE_DROID_*）")
     parser.add_argument("--traj-id", type=int, default=1,
                         help="轨迹 ID")
     parser.add_argument("--fps", type=int, default=30,

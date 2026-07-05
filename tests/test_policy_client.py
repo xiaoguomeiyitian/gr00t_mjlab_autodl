@@ -85,3 +85,194 @@ class TestGR00TClient:
         deserialized = _MsgSerializer.from_bytes(serialized)
         np.testing.assert_array_equal(deserialized["test"], data["test"])
         client.close()
+
+
+class TestGR00TClientMock:
+    """用 mock socket 测试 _call_endpoint 核心路径。"""
+
+    def test_call_endpoint_success(self, monkeypatch):
+        """正常请求-响应路径。"""
+        import src.policy_client as pc
+
+        client = GR00TClient.__new__(GR00TClient)
+        client._closed = False
+        client.host = "127.0.0.1"
+        client.port = 5555
+        client.timeout_ms = 30000
+
+        # mock zmq context + socket
+        class FakeSocket:
+            def __init__(self):
+                self.sent = None
+                self.recv_data = _MsgSerializer.to_bytes({"result": "ok"})
+
+            def setsockopt(self, *a, **kw):
+                pass
+
+            def send(self, data):
+                self.sent = data
+
+            def recv(self):
+                return self.recv_data
+
+            def close(self, linger=0):
+                pass
+
+            def connect(self, addr):
+                pass
+
+        fake_socket = FakeSocket()
+
+        class FakeContext:
+            def socket(self, sock_type):
+                return fake_socket
+
+            def term(self):
+                pass
+
+        client.context = FakeContext()
+        client.socket = fake_socket
+
+        result = client._call_endpoint("get_action", {"observation": {}})
+        assert result == {"result": "ok"}
+
+    def test_call_endpoint_error_response(self, monkeypatch):
+        """server 返回 b"ERROR" 时抛 RuntimeError 并重建 socket。"""
+        import src.policy_client as pc
+
+        client = GR00TClient.__new__(GR00TClient)
+        client._closed = False
+        client.host = "127.0.0.1"
+        client.port = 5555
+        client.timeout_ms = 30000
+
+        rebuilt = {"count": 0}
+
+        class FakeSocket:
+            def __init__(self, recv_data=b"ERROR"):
+                self.recv_data = recv_data
+                self.closed = False
+
+            def setsockopt(self, *a, **kw):
+                pass
+
+            def send(self, data):
+                pass
+
+            def recv(self):
+                return self.recv_data
+
+            def close(self, linger=0):
+                self.closed = True
+                rebuilt["count"] += 1
+
+            def connect(self, addr):
+                pass
+
+        current_socket = FakeSocket(b"ERROR")
+
+        class FakeContext:
+            def __init__(self):
+                self.socket_type = None
+
+            def socket(self, sock_type):
+                return current_socket
+
+            def term(self):
+                pass
+
+        client.context = FakeContext()
+        client.socket = current_socket
+
+        with pytest.raises(RuntimeError, match="Server error"):
+            client._call_endpoint("ping", requires_input=False)
+
+        # ERROR 后应重建 socket（关闭旧的）
+        assert rebuilt["count"] >= 1
+
+    def test_call_endpoint_error_dict(self, monkeypatch):
+        """server 返回含 error key 的 dict 时抛 RuntimeError。"""
+        client = GR00TClient.__new__(GR00TClient)
+        client._closed = False
+        client.host = "127.0.0.1"
+        client.port = 5555
+        client.timeout_ms = 30000
+
+        class FakeSocket:
+            def __init__(self):
+                self.recv_data = _MsgSerializer.to_bytes({"error": "model not loaded"})
+
+            def setsockopt(self, *a, **kw):
+                pass
+
+            def send(self, data):
+                pass
+
+            def recv(self):
+                return self.recv_data
+
+            def close(self, linger=0):
+                pass
+
+            def connect(self, addr):
+                pass
+
+        fake_socket = FakeSocket()
+
+        class FakeContext:
+            def socket(self, sock_type):
+                return fake_socket
+
+            def term(self):
+                pass
+
+        client.context = FakeContext()
+        client.socket = fake_socket
+
+        with pytest.raises(RuntimeError, match="model not loaded"):
+            client._call_endpoint("get_action", {"observation": {}})
+
+    def test_ping_returns_false_on_timeout(self, monkeypatch):
+        """ping 超时时返回 False 并重建 socket。"""
+        import zmq
+
+        client = GR00TClient.__new__(GR00TClient)
+        client._closed = False
+        client.host = "127.0.0.1"
+        client.port = 5555
+        client.timeout_ms = 100
+
+        closed = {"count": 0}
+
+        class FakeSocket:
+            def setsockopt(self, *a, **kw):
+                pass
+
+            def send(self, data):
+                raise zmq.error.Again()
+
+            def recv(self):
+                raise zmq.error.Again()
+
+            def close(self, linger=0):
+                closed["count"] += 1
+
+            def connect(self, addr):
+                pass
+
+        current_socket = FakeSocket()
+
+        class FakeContext:
+            def socket(self, sock_type):
+                return current_socket
+
+            def term(self):
+                pass
+
+        client.context = FakeContext()
+        client.socket = current_socket
+
+        result = client.ping()
+        assert result is False
+        # 超时后应关闭旧 socket
+        assert closed["count"] >= 1
