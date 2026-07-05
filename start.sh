@@ -16,9 +16,6 @@
 #   ./start.sh verify [robot] [vis_mode: viser|mujoco]
 #   ./start.sh viser-infer [robot] [host] [port] [viser_port]
 #   ./start.sh mujoco-infer [robot] [host] [port]
-#   ./start.sh retarget-to-lerobot [robot] [motion_file] [output_dir]
-#   ./start.sh sim-playback [robot] [motion_file] [output_dir]
-#   ./start.sh batch-retarget [robot] [input_dir] [output_dir]
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -57,9 +54,6 @@ show_menu() {
     echo -e "${CYAN}║${NC}   ${YELLOW}9)${NC} 本地 — 推理验证                                    ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}   ${MAGENTA}10)${NC} Viser + Policy Server 推理可视化                  ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}   ${MAGENTA}11)${NC} MuJoCo + Policy Server 推理可视化                ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}   ${RED}12)${NC} 从 robot_retargeter 动作生成训练数据              ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}   ${RED}13)${NC} 仿真回放 + 采集训练数据                            ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}   ${RED}14)${NC} 批量转换 robot_retargeter 动作                     ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}                                                          ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}   ${YELLOW}S)${NC} 查看配置                                            ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}   ${YELLOW}H)${NC} 查看帮助                                            ${CYAN}║${NC}"
@@ -144,7 +138,7 @@ select_lerobot_dir() {
     local idx=0
 
     # 扫描 output/ 下所有 *_lerobot 目录
-    for d in "$SCRIPT_DIR/output/"*_lerobot "$SCRIPT_DIR/output/"*_from_retarget "$SCRIPT_DIR/output/"*_all_retarget; do
+    for d in "$SCRIPT_DIR/output/"*_lerobot; do
         [ -d "$d" ] || continue
         dirs+=("$d")
         idx=$((idx + 1))
@@ -153,7 +147,7 @@ select_lerobot_dir() {
 
     if [ ${#dirs[@]} -eq 0 ]; then
         echo "   ⚠️  未找到 LeRobot 数据集目录"
-        echo "   请先运行数据采集 (选项 5) 或 retarget (选项 12/13)"
+        echo "   请先运行数据采集 (选项 5)"
         return 1
     fi
 
@@ -253,139 +247,6 @@ run_mujoco_infer() {
         --embodiment-tag "$EMBODIMENT_TAG"
 }
 
-select_motion_file() {
-    local robot="$1"
-    local -a motion_files=()
-    local idx=0
-
-    # 1. robot_retargeter 重定向后的 CSV
-    for f in "$SCRIPT_DIR/../robot_retargeter/output_data/robot_motion/"*_${robot}.csv; do
-        [ -f "$f" ] || continue
-        motion_files+=("$f")
-        idx=$((idx + 1))
-        printf "    [%d] %s (CSV)\n" "$idx" "$(basename "$f")"
-    done
-
-    # 2. robot_retargeter 重定向后的 NPZ
-    for f in "$SCRIPT_DIR/../robot_retargeter/output_data/robot_motion/"*_${robot}.npz; do
-        [ -f "$f" ] || continue
-        motion_files+=("$f")
-        idx=$((idx + 1))
-        printf "    [%d] %s (NPZ)\n" "$idx" "$(basename "$f")"
-    done
-
-    # 3. robot_retargeter export_npz 输出的 NPZ
-    for f in "$SCRIPT_DIR/../robot_retargeter/output_data/npz/"*_${robot}.npz; do
-        [ -f "$f" ] || continue
-        motion_files+=("$f")
-        idx=$((idx + 1))
-        printf "    [%d] %s (NPZ)\n" "$idx" "$(basename "$f")"
-    done
-
-    # 4. robot_retargeter 原始数据集 CSV
-    for f in "$SCRIPT_DIR/../robot_retargeter/dataset/"*/*_${robot}.csv; do
-        [ -f "$f" ] || continue
-        motion_files+=("$f")
-        idx=$((idx + 1))
-        printf "    [%d] %s (原始)\n" "$idx" "$(basename "$f")"
-    done
-    for f in "$SCRIPT_DIR/../robot_retargeter/dataset/"*/"${robot}/"*.csv; do
-        [ -f "$f" ] || continue
-        motion_files+=("$f")
-        idx=$((idx + 1))
-        printf "    [%d] %s (原始)\n" "$idx" "$(basename "$f")"
-    done
-
-    if [ ${#motion_files[@]} -eq 0 ]; then
-        echo "   ⚠️  未找到 ${robot} 的动作文件"
-        echo "   请先运行 robot_retargeter 生成动作数据:"
-        echo "   cd ../robot_retargeter && ./start.sh"
-        return 1
-    fi
-
-    echo ""
-    echo -n "   请选择 [1-$idx] (默认 1): " && read sel
-    sel="${sel:-1}"
-
-    if ! [[ "$sel" =~ ^[0-9]+$ ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt "$idx" ]; then
-        echo "   ❌ 无效选择: $sel，使用默认值 1"
-        sel=1
-    fi
-
-    # 返回选中的文件（数组索引从 0 开始）
-    MOTION_FILE_SELECTED="${motion_files[$((sel - 1))]}"
-    echo "   → 已选择: $(basename "$MOTION_FILE_SELECTED")"
-    return 0
-}
-
-run_retarget_to_lerobot() {
-    local robot="${1:-g1}"
-    local motion_file="${2:-}"
-    local output_dir="${3:-$SCRIPT_DIR/output/${robot}_from_retarget}"
-    echo -e "${GREEN}📦 从 robot_retargeter 动作生成训练数据 (${robot})...${NC}"
-    echo ""
-
-    if [ -z "$motion_file" ]; then
-        echo "   可用的动作文件:"
-        if ! select_motion_file "$robot"; then
-            return 1
-        fi
-        motion_file="$MOTION_FILE_SELECTED"
-    fi
-
-    if [ ! -f "$motion_file" ]; then
-        echo "❌ 无效的动作文件: $motion_file"
-        return 1
-    fi
-
-    echo "   动作文件: $motion_file"
-    echo "   输出: $output_dir"
-    echo ""
-    bash "$SCRIPT_DIR/scripts/10_retarget_to_lerobot.sh" "$robot" "$motion_file" "$output_dir"
-}
-
-run_sim_playback() {
-    local robot="${1:-g1}"
-    local motion_file="${2:-}"
-    local output_dir="${3:-$SCRIPT_DIR/output/${robot}_sim_raw}"
-    echo -e "${GREEN}🎮 仿真回放 + 采集训练数据 (${robot})...${NC}"
-    echo ""
-
-    if [ -z "$motion_file" ]; then
-        echo "   可用的动作文件:"
-        if ! select_motion_file "$robot"; then
-            return 1
-        fi
-        motion_file="$MOTION_FILE_SELECTED"
-    fi
-
-    if [ ! -f "$motion_file" ]; then
-        echo "❌ 无效的动作文件: $motion_file"
-        return 1
-    fi
-
-    echo "   动作文件: $motion_file"
-    echo "   输出: $output_dir"
-    echo ""
-    $PYTHON -m src.sim_playback \
-        --motion "$motion_file" \
-        --robot "$robot" \
-        --output "$output_dir" \
-        --num-episodes 5 \
-        --episode-length 300
-}
-
-run_batch_retarget() {
-    local robot="${1:-g1}"
-    local input_dir="${2:-$SCRIPT_DIR/../robot_retargeter/output_data/robot_motion}"
-    local output_dir="${3:-$SCRIPT_DIR/output/${robot}_all_retarget}"
-    echo -e "${GREEN}📦 批量转换 robot_retargeter 动作 (${robot})...${NC}"
-    echo ""
-    echo "   输入目录: $input_dir"
-    echo "   输出目录: $output_dir"
-    echo ""
-    bash "$SCRIPT_DIR/scripts/11_batch_retarget.sh" "$robot" "$input_dir" "$output_dir"
-}
 show_config() {
     echo -e "${YELLOW}📋 当前配置:${NC}"
     echo ""
@@ -415,17 +276,10 @@ show_help() {
     echo "    ./start.sh verify [robot] [vis_mode: viser|mujoco]"
     echo "    ./start.sh viser-infer [robot] [host] [port] [viser_port]"
     echo "    ./start.sh mujoco-infer [robot] [host] [port]"
-    echo "    ./start.sh retarget-to-lerobot [robot] [motion_file] [output_dir]"
-    echo "    ./start.sh sim-playback [robot] [motion_file] [output_dir]"
-    echo "    ./start.sh batch-retarget [robot] [input_dir] [output_dir]"
     echo ""
     echo "  robot 可选: g1, h1, h1_with_hand, h1_2, h2, go2"
     echo ""
     echo "  端到端示例（G1 机器人）:"
-    echo "    # 从 robot_retargeter 动作生成训练数据"
-    echo "    ./start.sh retarget-to-lerobot g1 ../robot_retargeter/dataset/lafan1_g1/dance1_subject2.csv"
-    echo "    ./start.sh sim-playback g1 ../robot_retargeter/dataset/lafan1_g1/dance1_subject2.csv"
-    echo "    ./start.sh batch-retarget g1 ../robot_retargeter/dataset/lafan1_g1"
     echo "    # 上传并训练"
     echo "    ./start.sh upload g1"
     echo "    ./start.sh train g1"
@@ -489,18 +343,6 @@ case "${1:-}" in
         run_mujoco_infer "$2" "$3" "$4"
         exit 0
         ;;
-    retarget-to-lerobot)
-        run_retarget_to_lerobot "$2" "$3" "$4"
-        exit 0
-        ;;
-    batch-retarget)
-        run_batch_retarget "$2" "$3" "$4"
-        exit 0
-        ;;
-    sim-playback)
-        run_sim_playback "$2" "$3" "$4"
-        exit 0
-        ;;
     help|--help|-h)
         show_help
         exit 0
@@ -510,7 +352,7 @@ esac
 # ─── 交互模式 ───
 while true; do
     show_menu
-    read -p "请选择 [0-14, S, H]: " choice
+    read -p "请选择 [0-11, S, H]: " choice
 
     case $choice in
         1) run_init ;;
@@ -571,18 +413,6 @@ while true; do
             echo -n "Policy Server 端口 (默认 ${PORT}): " && read port
             port="${port:-${PORT}}"
             run_mujoco_infer "${robot}" "$host" "$port"
-            ;;
-        12)
-            select_robot
-            run_retarget_to_lerobot "${robot}"
-            ;;
-        13)
-            select_robot
-            run_sim_playback "${robot}"
-            ;;
-        14)
-            select_robot
-            run_batch_retarget "${robot}"
             ;;
         [sS]) show_config ;;
         [hH]) show_help ;;

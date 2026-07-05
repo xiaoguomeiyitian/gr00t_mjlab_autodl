@@ -1,7 +1,6 @@
 """测试 viz 推理模块（不依赖 viser/mujoco 的纯逻辑部分）。"""
 
 import numpy as np
-import pytest
 
 
 class TestViserInferActionExtraction:

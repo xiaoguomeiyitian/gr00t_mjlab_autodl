@@ -26,7 +26,7 @@ NVIDIA Isaac-GR00T 的云端推理 + 本地训练编排兄弟项目。
 ### 1. 统一入口
 
 ```bash
-./start.sh              # 交互式菜单（13 个功能）
+./start.sh              # 交互式菜单（11 个功能）
 ./start.sh help         # 查看所有命令
 ```
 
@@ -53,7 +53,6 @@ NVIDIA Isaac-GR00T 的云端推理 + 本地训练编排兄弟项目。
 
 ```bash
 # 云端（AutoDL）
-bash scripts/00_local_prepare_cache.sh                      # 本地准备 uv 缓存（一次性）
 bash scripts/00_autodl_init.sh                              # 云端环境初始化
 bash scripts/01_start_server.sh nvidia/GR00T-N1.7-3B ...    # 启动推理服务
 
@@ -98,11 +97,10 @@ bash scripts/09_local_verify.sh g1 viser                     # 推理验证
 ```
 gr00t_mjlab_autodl/
 ├── README.md
-├── start.sh                           # 统一入口（交互/非交互 13 个功能）
+├── start.sh                           # 统一入口（交互/非交互 11 个功能）
 ├── config/
 │   └── ssh_config.sh                  # SSH 配置（用户填写）
 ├── scripts/
-│   ├── 00_local_prepare_cache.sh      # [本地] 准备 uv 缓存（一次性）
 │   ├── 00_autodl_init.sh              # [云端] 环境初始化
 │   ├── 01_start_server.sh             # [云端] 启动 Policy Server
 │   ├── 02_local_tunnel.sh             # [本地] SSH 隧道
@@ -111,10 +109,8 @@ gr00t_mjlab_autodl/
 │   ├── 06_autodl_train.sh             # [云端] 微调训练
 │   ├── 07_download_model.sh           # [本地] 下载模型
 │   ├── 08_local_quantize.sh           # [本地] INT4 量化
-│   ├── 09_local_verify.sh             # [本地] 推理验证
-│   ├── 10_retarget_to_lerobot.sh      # [本地] robot_retargeter 动作 → LeRobot v2
-│   └── 11_batch_retarget.sh           # [本地] 批量转换
-├── src/                               # 源码（5494 行 Python）
+│   └── 09_local_verify.sh             # [本地] 推理验证
+├── src/                               # 源码
 │   ├── __init__.py
 │   ├── policy_client.py               # 纯 ZMQ 客户端（不依赖 torch）
 │   ├── observation_builder.py         # 观测格式构建
@@ -148,8 +144,6 @@ gr00t_mjlab_autodl/
 │   ├── test_convert_to_lerobot.py
 │   ├── test_export_int4.py
 │   ├── test_observation_builder.py
-│   ├── test_policy_client.py
-│   └── test_retarget_to_lerobot.py
 │   └── test_policy_client.py
 ├── output/                            # 推理输出（gitignore）
 └── plan.md                            # 方案设计文档
@@ -218,10 +212,9 @@ pytest tests/ -v
 # 运行指定模块测试
 pytest tests/test_quantize_safetensors.py -v
 pytest tests/test_collect_data.py -v
-pytest tests/test_retarget_to_lerobot.py -v
 ```
 
-覆盖：配置、NF4 量化、推理缓冲区、数据采集、格式转换、INT4 导出、观测构建、ZMQ 客户端、retarget 转换。
+覆盖：配置、NF4 量化、推理缓冲区、数据采集、格式转换、INT4 导出、观测构建、ZMQ 客户端。
 
 ## 常见问题
 
@@ -235,12 +228,6 @@ pytest tests/test_retarget_to_lerobot.py -v
 | 量化报错 OOM | 使用 `export_int4_offline.py`（CPU 友好） |
 | MuJoCo 窗口打不开 | 需要桌面环境（X11/Wayland），远程用 Viser |
 | safetensors 版本报错 | `pip install safetensors>=0.8` |
-
-## 技术文档
-
-| 文档 | 说明 |
-|------|------|
-| `plan-retarget-to-lerobot.md` | retarget → LeRobot 方案设计 |
 
 ## 当前状态
 

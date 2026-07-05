@@ -130,7 +130,7 @@ def _export_via_lut(
     """通过查找表进行 safetensors 级别 NF4 量化（无需 transformers）。"""
     from safetensors import safe_open
     from safetensors.numpy import save_file
-    from src.quantize_safetensors import quantize_to_nf4, BLOCK_SIZE
+    from src.quantize_safetensors import quantize_to_nf4
 
     model_path = Path(model_path)
 

@@ -1,7 +1,6 @@
 """测试本地推理模块。"""
 
 import numpy as np
-import pytest
 
 from src.infer import ActionChunkBuffer, GR00TLocalInference
 

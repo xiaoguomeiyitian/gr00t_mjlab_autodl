@@ -1,8 +1,5 @@
 """测试机器人配置模块。"""
 
-import pytest
-import numpy as np
-
 
 class TestG1Config:
     """G1 人形机器人配置测试。"""
