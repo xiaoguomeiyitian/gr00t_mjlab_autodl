@@ -42,7 +42,7 @@ def g1_raw_episode(temp_dir: Path) -> dict:
         "rewards": np.random.randn(num_steps).astype(np.float32),
         "task_name": "Mjlab-Velocity-Flat-Unitree-G1",
         "robot": "g1",
-        "action_mode": "delta",
+        "action_mode": "absolute",
     }
 
 
@@ -58,7 +58,7 @@ def go2_raw_episode(temp_dir: Path) -> dict:
         "rewards": np.random.randn(num_steps).astype(np.float32),
         "task_name": "Mjlab-Velocity-Flat-Unitree-Go2",
         "robot": "go2",
-        "action_mode": "delta",
+        "action_mode": "absolute",
     }
 
 

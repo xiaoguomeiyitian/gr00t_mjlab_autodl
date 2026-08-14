@@ -20,6 +20,8 @@ class TestBuildModalityJson:
         assert "annotation" in modality
         assert modality["state"]["joint_pos"] == {"start": 0, "end": 29}
         assert modality["state"]["joint_vel"] == {"start": 29, "end": 58}
+        # action key 与 state key "joint_pos" 一致（GR00T RELATIVE 要求）
+        assert modality["action"]["joint_pos"] == {"start": 0, "end": 29}
         assert "front" in modality["video"]
         assert "wrist" in modality["video"]
 
@@ -27,6 +29,7 @@ class TestBuildModalityJson:
         modality = _build_modality_json("go2", 12, 37, ["front", "back"])
         assert modality["state"]["joint_pos"] == {"start": 0, "end": 12}
         assert modality["state"]["joint_vel"] == {"start": 12, "end": 24}
+        assert modality["action"]["joint_pos"] == {"start": 0, "end": 12}
         assert "front" in modality["video"]
         assert "back" in modality["video"]
 
@@ -75,7 +78,7 @@ class TestConvertToLeRobot:
         meta = {
             "robot": "g1",
             "task": "test",
-            "action_mode": "delta",
+            "action_mode": "absolute",
             "num_episodes": 2,
             "episode_length": 10,
             "fps": 30,
@@ -143,7 +146,7 @@ class TestConvertToLeRobot:
         )
         _create_placeholder_video(str(raw / "episode_0000.mp4"), 5, 30, ["front"])
         meta = {"robot": "go2", "state_dim": 37, "action_dim": 12, "num_joints": 12,
-                "camera_names": ["front", "back"], "fps": 30, "action_mode": "delta",
+                "camera_names": ["front", "back"], "fps": 30, "action_mode": "absolute",
                 "num_episodes": 1, "episode_length": 5, "image_size": [32, 32], "task": "trot"}
         with open(raw / "collection_meta.json", "w") as f:
             json.dump(meta, f)

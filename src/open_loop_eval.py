@@ -42,12 +42,14 @@ def evaluate_episode(
     dataset: LeRobotEpisodeLoader,
     traj_id: int,
     action_horizon: int,
-    action_key: str = "joint_position_delta",
+    action_key: str = "joint_pos",
 ) -> dict:
-    """对单个 episode 做开环评估：每步预测 action_horizon 步，对比 GT。
+    """对单个 episode 做开环评估：每 action_horizon 步推理一次，消费 chunk 中多步，对比 GT。
 
-    开环语义：在第 t 步用 GT 观测预测，取预测的第 0 步与 GT[t] 比较
-    （与官方 open_loop_eval.py 一致）。
+    对齐官方 gr00t/eval/open_loop_eval.py 的 evaluate_single_trajectory：
+      - 每 execution_horizon 步推理一次（而非每步推理）
+      - 取预测 chunk 的前 action_horizon 步与 GT 逐步比较
+      - 开环语义：在第 t 步用 GT 观测预测，不将预测反馈到状态
     """
     episode = dataset[traj_id]
     n = len(episode)
@@ -58,7 +60,8 @@ def evaluate_episode(
     task_desc = episode.get_task_description(0)
 
     preds, gts = [], []
-    for t in range(n):
+    # 每 action_horizon 步推理一次，消费 chunk 中 action_horizon 步
+    for t in range(0, n, action_horizon):
         frame = episode.get_frame(t)
         images = frame["images"]
         state = frame["state"]
@@ -72,20 +75,31 @@ def evaluate_episode(
             print(f"    ⚠️  Step {t} 推理失败: {e}")
             continue
 
-        # 从 action dict 提取预测动作
+        # 从 action dict 提取预测动作 chunk
         action_data = result[0] if isinstance(result, tuple) else result
         if isinstance(action_data, dict):
-            pred = action_data.get(action_key, list(action_data.values())[0])
+            pred_chunk = action_data.get(action_key, list(action_data.values())[0])
         else:
-            pred = action_data
-        pred = np.asarray(pred, dtype=np.float32)
-        # pred 形状 (B, T, D) 或 (T, D) 或 (D,)，取第 0 步
-        while pred.ndim > 1:
-            pred = pred[0]
+            pred_chunk = action_data
+        pred_chunk = np.asarray(pred_chunk, dtype=np.float32)
+        # pred_chunk 形状 (B, T, D) 或 (T, D) 或 (D,)，去掉 batch 维
+        while pred_chunk.ndim > 2:
+            pred_chunk = pred_chunk[0]
 
-        gt = frame["gt_action"]
-        preds.append(pred)
-        gts.append(gt)
+        # 消费 chunk 中的前 action_horizon 步（或剩余步）
+        steps_to_take = min(action_horizon, n - t)
+        for j in range(steps_to_take):
+            if pred_chunk.ndim == 2 and j < pred_chunk.shape[0]:
+                pred = pred_chunk[j]
+            elif pred_chunk.ndim == 1:
+                pred = pred_chunk  # 单步
+            else:
+                pred = pred_chunk[0] if pred_chunk.ndim >= 1 else pred_chunk
+
+            gt_frame = episode.get_frame(t + j)
+            gt = gt_frame["gt_action"]
+            preds.append(pred)
+            gts.append(gt)
 
     if not preds:
         return {"traj_id": traj_id, "steps": 0, "mse": float("nan"), "mae": float("nan")}
@@ -120,7 +134,7 @@ def main():
     parser.add_argument("--traj-ids", type=int, nargs="+", default=[0],
                         help="评估的 episode 索引列表")
     parser.add_argument("--action-horizon", type=int, default=16)
-    parser.add_argument("--action-key", type=str, default="joint_position_delta",
+    parser.add_argument("--action-key", type=str, default="joint_pos",
                         help="从 action dict 提取的 key（与 modality_config.action.modality_keys 一致）")
     parser.add_argument("--language", type=str, default=None,
                         help="覆盖任务描述（默认从 tasks.jsonl 读取）")

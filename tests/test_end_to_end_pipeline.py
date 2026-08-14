@@ -103,8 +103,8 @@ class TestEndToEndDataPipeline:
         # state keys 与 g1_modality_config.py 一致
         expected_state_keys = {"joint_pos", "joint_vel", "base_pos", "base_quat", "base_lin_vel", "base_ang_vel"}
         assert set(modality["state"].keys()) == expected_state_keys
-        # action key
-        assert "joint_position_delta" in modality["action"]
+        # action key（与 state key "joint_pos" 一致，GR00T RELATIVE 要求）
+        assert "joint_pos" in modality["action"]
         # video keys
         assert "front" in modality["video"]
         assert "wrist" in modality["video"]
@@ -144,6 +144,22 @@ class TestEndToEndDataPipeline:
                 )
                 # 应该通过模拟的 check_observation
                 _mock_check_observation(obs, modality_config)
+
+    def test_observation_images_not_zero(self, lerobot_dataset):
+        """get_frame 返回的 images key 是短 key（如 'front'），与 ObservationBuilder 对齐。"""
+        dataset = LeRobotEpisodeLoader(dataset_path=str(lerobot_dataset))
+        episode = dataset[0]
+        frame = episode.get_frame(0)
+        # 短 key 而非完整列名
+        assert "front" in frame["images"]
+        # ObservationBuilder 能找到对应 key（不会零填充）
+        obs_builder = ObservationBuilder(
+            camera_keys=["front", "wrist"], state_dim=71,
+            state_slices=state_slices_from_config("g1"),
+        )
+        obs = obs_builder.build(images=frame["images"], state=frame["state"])
+        # front 相机有视频，不应是全零
+        assert not np.all(obs["video"]["front"] == 0), "front 图像不应全零（应从视频读取）"
 
     def test_state_split_values_correct(self, lerobot_dataset):
         """state 拆分后的值与原始拼接向量对应。"""

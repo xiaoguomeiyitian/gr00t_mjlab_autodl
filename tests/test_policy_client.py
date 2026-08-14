@@ -50,6 +50,12 @@ class TestMsgSerializer:
         deserialized = _MsgSerializer.from_bytes(serialized)
         assert deserialized["key"] is None
 
+    def test_refuses_object_dtype_ndarray(self):
+        """object-dtype ndarray 应被拒绝（对齐官方 MsgSerializer 安全防护）。"""
+        obj_arr = np.array([1, "two", 3], dtype=object)
+        with pytest.raises(TypeError, match="object-dtype ndarray"):
+            _MsgSerializer.to_bytes({"bad": obj_arr})
+
 
 class TestGR00TClient:
     """GR00TClient 测试（不需要实际服务器）。"""

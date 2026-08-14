@@ -99,7 +99,7 @@ class GR00TLocalInference:
             sys.path.insert(0, isaac_path)
 
         try:
-            from gr00t.policy.server_client import Gr00tPolicy
+            from gr00t.policy import Gr00tPolicy
 
             print(f"📦 加载模型: {self.model_path}")
             print(f"   量化模式: {self.quant_mode}")
@@ -196,7 +196,7 @@ class GR00TLocalInference:
         if isinstance(action_data, np.ndarray):
             return action_data
         elif isinstance(action_data, dict):
-            for key in ["action", "joint_position_delta", "joint_position"]:
+            for key in ["action", "joint_pos", "joint_position_delta", "joint_position"]:
                 if key in action_data:
                     val = action_data[key]
                     if isinstance(val, np.ndarray):

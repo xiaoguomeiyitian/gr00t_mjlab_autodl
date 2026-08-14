@@ -126,10 +126,16 @@ class ObservationBuilder:
         return state_dict
 
     def _build_language(self, language: Optional[str]) -> dict:
-        """构建 language 字典：{language_key: [[str]]}，形状 (B, T)。"""
+        """构建 language 字典：{language_key: [[str]]}，形状 (B, T)。
+
+        官方 check_observation 契约：language[key] = list[list[str]]
+          - 外层 list 长度 = B（batch size，固定为 1）
+          - 内层 list 长度 = T（= len(language.delta_indices)，通常 1）
+          - 每个 T 元素是 1 个 str
+        """
         text = language if language is not None else self.language_instruction
-        # 契约：list[list[list[str]]] 外层 B，中层 T，内层 1 个 str
-        return {self.language_key: [[text] for _ in range(self.num_obs_steps)]}
+        # 外层 B=1，内层 T=num_obs_steps，每步 1 个 str
+        return {self.language_key: [[text] * self.num_obs_steps]}
 
     def _ensure_video_dims(self, img: np.ndarray) -> np.ndarray:
         """将图像统一成 (B, T, H, W, 3) uint8。支持 (H,W,3)/(T,H,W,3)/(B,T,H,W,3)。"""

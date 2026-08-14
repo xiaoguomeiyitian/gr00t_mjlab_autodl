@@ -175,8 +175,8 @@ class TestLeRobotVideoLoading:
         loader = LeRobotEpisodeLoader(str(temp_dir))
         ep = loader[0]
         frame = ep.get_frame(0)
-        assert "observation.images.front" in frame["images"]
-        img = frame["images"]["observation.images.front"]
+        assert "front" in frame["images"]
+        img = frame["images"]["front"]
         assert img.shape == (224, 224, 3)  # image_size 默认 224x224
         assert img.dtype == np.uint8
 
@@ -185,8 +185,8 @@ class TestLeRobotVideoLoading:
         self._make_dataset_with_video(temp_dir, num_frames=3)
         loader = LeRobotEpisodeLoader(str(temp_dir))
         ep = loader[0]
-        f0 = ep.get_frame(0)["images"]["observation.images.front"]
-        f2 = ep.get_frame(2)["images"]["observation.images.front"]
+        f0 = ep.get_frame(0)["images"]["front"]
+        f2 = ep.get_frame(2)["images"]["front"]
         # 帧 0 和帧 2 像素值不同
         assert not np.array_equal(f0, f2)
 
@@ -213,7 +213,7 @@ class TestLeRobotVideoLoading:
         loader = LeRobotEpisodeLoader(str(temp_dir))
         ep = loader[0]
         frame = ep.get_frame(0)
-        img = frame["images"]["observation.images.front"]
+        img = frame["images"]["front"]
         assert img.shape == (224, 224, 3)
         np.testing.assert_array_equal(img, 0)
 

@@ -42,14 +42,17 @@ def get_modality_config() -> dict:
         ],
     ),
     # 动作：16 步预测 horizon
+    # action key 与 state key "joint_pos" 一致，state_key 显式指定。
+    # 数据集中存储绝对关节角，absolute→relative 转换由 processor 处理。
     "action": ModalityConfig(
         delta_indices=list(range(0, 16)),
-        modality_keys=["joint_position_delta"],
+        modality_keys=["joint_pos"],
         action_configs=[
             ActionConfig(
                 rep=ActionRepresentation.RELATIVE,
                 type=ActionType.NON_EEF,
                 format=ActionFormat.DEFAULT,
+                state_key="joint_pos",
             ),
         ],
     ),
@@ -61,7 +64,6 @@ def get_modality_config() -> dict:
     }
 
 
-# 兼容旧接口：模块导入时自动注册为 NEW_EMBODIMENT
-# 注意：单进程只能注册一个 NEW_EMBODIMENT，多机器人场景请用 get_modality_config() 手动注册
-go2_config = get_modality_config()
-register_modality_config(go2_config, embodiment_tag=EmbodimentTag.NEW_EMBODIMENT)
+# 注意：不在模块导入时自动注册，由训练脚本按需调用：
+#   from src.configs.go2_modality_config import get_modality_config
+#   register_modality_config(get_modality_config(), embodiment_tag=EmbodimentTag.NEW_EMBODIMENT)

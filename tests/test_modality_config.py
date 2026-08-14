@@ -40,6 +40,24 @@ def test_get_modality_config_structure(robot, module_name):
     assert isinstance(action_delta, list)
     assert len(action_delta) > 0
 
+    # action.modality_keys 必须与 state 中的某个 key 一致（GR00T RELATIVE 要求）
+    action_keys = config["action"].modality_keys
+    assert len(action_keys) == 1
+    assert action_keys[0] in state_keys, (
+        f"action key '{action_keys[0]}' 必须在 state keys {state_keys} 中，"
+        f"否则 StateActionProcessor use_relative_action=True 时会 KeyError"
+    )
+
+    # action_configs 的 state_key 必须显式指定且在 state keys 中
+    action_configs = config["action"].action_configs
+    assert action_configs is not None
+    assert len(action_configs) == len(action_keys)
+    for ac in action_configs:
+        assert ac.state_key is not None, "ActionConfig.state_key 必须显式指定"
+        assert ac.state_key in state_keys, (
+            f"ActionConfig.state_key '{ac.state_key}' 必须在 state keys {state_keys} 中"
+        )
+
 
 @pytest.mark.parametrize("robot,module_name,expected_video_keys", [
     ("g1", "g1_modality_config", ["front", "wrist"]),

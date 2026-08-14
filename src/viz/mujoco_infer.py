@@ -186,7 +186,7 @@ class MuJoCoInferLoop:
         if isinstance(action_result, (tuple, list)) and len(action_result) == 2:
             action_result = action_result[0]
         if isinstance(action_result, dict):
-            for key in ["joint_position_delta", "joint_position", "action"]:
+            for key in ["joint_pos", "joint_position_delta", "joint_position", "action"]:
                 if key in action_result:
                     arr = np.asarray(action_result[key], dtype=np.float32)
                     return self._squeeze_action(arr)
@@ -224,7 +224,7 @@ class MuJoCoInferLoop:
             action_result, info = self.client.get_action(obs)
             # 从 action dict 提取单步动作向量
             action = self._extract_action_vector(action_result)
-            # 更新状态：action 是 joint_position_delta，仅累加到 joint_pos 切片
+            # 更新状态：action 是 joint_pos（RELATIVE delta），仅累加到 joint_pos 切片
             num_joints = len(action)
             if len(state) >= num_joints:
                 state = state.copy()

@@ -43,14 +43,18 @@ def get_modality_config() -> dict:
             ],
         ),
         # 动作：16 步预测 horizon
+        # action key 与 state key "joint_pos" 一致，state_key 显式指定，
+        # 这样 StateActionProcessor 在 use_relative_action=True 时能找到 reference state。
+        # 数据集中存储绝对关节角，absolute→relative 转换由 processor 处理。
         "action": ModalityConfig(
             delta_indices=list(range(0, 16)),
-            modality_keys=["joint_position_delta"],
+            modality_keys=["joint_pos"],
             action_configs=[
                 ActionConfig(
                     rep=ActionRepresentation.RELATIVE,  # delta from current joint_pos
                     type=ActionType.NON_EEF,  # 关节空间，非末端执行器
                     format=ActionFormat.DEFAULT,
+                    state_key="joint_pos",  # 显式指定 reference state key
                 ),
             ],
         ),
@@ -62,7 +66,7 @@ def get_modality_config() -> dict:
     }
 
 
-# 兼容旧接口：模块导入时自动注册为 NEW_EMBODIMENT
-# 注意：单进程只能注册一个 NEW_EMBODIMENT，多机器人场景请用 get_modality_config() 手动注册
-g1_config = get_modality_config()
-register_modality_config(g1_config, embodiment_tag=EmbodimentTag.NEW_EMBODIMENT)
+# 注意：不在模块导入时自动注册，由训练脚本按需调用：
+#   from src.configs.g1_modality_config import get_modality_config
+#   register_modality_config(get_modality_config(), embodiment_tag=EmbodimentTag.NEW_EMBODIMENT)
+# 这样避免多机器人共用 NEW_EMBODIMENT 时互相覆盖。

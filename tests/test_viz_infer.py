@@ -12,20 +12,20 @@ class TestViserInferActionExtraction:
 
     def test_dict_btd(self):
         loop = self._make_loop()
-        action = {"joint_position_delta": np.random.randn(1, 16, 29).astype(np.float32)}
+        action = {"joint_pos": np.random.randn(1, 16, 29).astype(np.float32)}
         v = loop._extract_action_vector(action)
         assert v.shape == (29,)
         assert v.dtype == np.float32
 
     def test_dict_td(self):
         loop = self._make_loop()
-        action = {"joint_position_delta": np.random.randn(16, 29).astype(np.float32)}
+        action = {"joint_pos": np.random.randn(16, 29).astype(np.float32)}
         v = loop._extract_action_vector(action)
         assert v.shape == (29,)
 
     def test_dict_d(self):
         loop = self._make_loop()
-        action = {"joint_position_delta": np.random.randn(29).astype(np.float32)}
+        action = {"joint_pos": np.random.randn(29).astype(np.float32)}
         v = loop._extract_action_vector(action)
         assert v.shape == (29,)
 
@@ -50,7 +50,7 @@ class TestViserInferActionExtraction:
     def test_tuple_action_info(self):
         """(action_dict, info) tuple 防御性处理。"""
         loop = self._make_loop()
-        action = {"joint_position_delta": np.random.randn(1, 16, 29).astype(np.float32)}
+        action = {"joint_pos": np.random.randn(1, 16, 29).astype(np.float32)}
         v = loop._extract_action_vector((action, {"info": 1}))
         assert v.shape == (29,)
 
@@ -65,6 +65,13 @@ class TestViserInferActionExtraction:
     def test_dict_joint_position_key(self):
         loop = self._make_loop()
         action = {"joint_position": np.random.randn(1, 8, 29).astype(np.float32)}
+        v = loop._extract_action_vector(action)
+        assert v.shape == (29,)
+
+    def test_dict_joint_position_delta_backcompat(self):
+        """旧 key joint_position_delta 仍可识别（向后兼容）。"""
+        loop = self._make_loop()
+        action = {"joint_position_delta": np.random.randn(1, 16, 29).astype(np.float32)}
         v = loop._extract_action_vector(action)
         assert v.shape == (29,)
 
@@ -105,7 +112,7 @@ class TestMuJoCoInferActionExtraction:
 
     def test_dict_btd(self):
         loop = self._make_loop()
-        action = {"joint_position_delta": np.random.randn(1, 16, 29).astype(np.float32)}
+        action = {"joint_pos": np.random.randn(1, 16, 29).astype(np.float32)}
         v = loop._extract_action_vector(action)
         assert v.shape == (29,)
 
@@ -117,7 +124,7 @@ class TestMuJoCoInferActionExtraction:
 
     def test_tuple_action_info(self):
         loop = self._make_loop()
-        action = {"joint_position_delta": np.random.randn(1, 16, 29).astype(np.float32)}
+        action = {"joint_pos": np.random.randn(1, 16, 29).astype(np.float32)}
         v = loop._extract_action_vector((action, {}))
         assert v.shape == (29,)
 

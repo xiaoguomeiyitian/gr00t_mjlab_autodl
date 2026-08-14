@@ -119,7 +119,7 @@ class TestDataCollector:
         assert images["front"].shape[:2] == (112, 112)
 
     def test_generate_action_delta(self):
-        collector = DataCollector(robot="g1", action_mode="delta")
+        collector = DataCollector(robot="g1", action_mode="absolute")
         state = np.zeros(71)
         action = collector._generate_action(state, 0)
         assert action.shape == (29,)

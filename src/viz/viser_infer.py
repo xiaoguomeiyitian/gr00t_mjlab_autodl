@@ -373,7 +373,7 @@ class ViserInferLoop:
         """从推理结果提取单步动作向量 (action_dim,)。
 
         action_result 可能是：
-          - dict: {"joint_position_delta": (B,T,D) ndarray} → 取 [0,0,:] 或 [0,:]
+          - dict: {"joint_pos": (B,T,D) ndarray} → 取 [0,0,:] 或 [0,:]
           - ndarray: (B,T,D) / (T,D) / (D,) → 取首步首 batch
           - tuple/list: (action_dict, info_dict) → 递归处理第一个元素
         """
@@ -384,8 +384,8 @@ class ViserInferLoop:
             action_result = action_result[0]
 
         if isinstance(action_result, dict):
-            # 优先 joint_position_delta，其次任意 action key
-            for key in ["joint_position_delta", "joint_position", "action"]:
+            # 优先 joint_pos（与 modality_config 对齐），其次旧 key
+            for key in ["joint_pos", "joint_position_delta", "joint_position", "action"]:
                 if key in action_result:
                     arr = np.asarray(action_result[key], dtype=np.float32)
                     return self._squeeze_action(arr)
@@ -430,11 +430,11 @@ class ViserInferLoop:
                 # 推理
                 action_result, info = self.client.get_action(obs)
 
-                # action_result 可能是 dict（如 {"joint_position_delta": (B,T,D) ndarray}）
+                # action_result 可能是 dict（如 {"joint_pos": (B,T,D) ndarray}）
                 # 或 ndarray。提取单步动作向量 (action_dim,)
                 action = self._extract_action_vector(action_result)
 
-                # action 是 joint_position_delta，累加到绝对关节角
+                # action 是 joint_pos（RELATIVE delta），累加到绝对关节角
                 num_act = len(action)
                 if len(qpos) >= num_act:
                     qpos = qpos.copy()

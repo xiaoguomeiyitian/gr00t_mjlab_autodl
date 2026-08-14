@@ -211,7 +211,8 @@ def _build_modality_json(robot: str, num_joints: int, state_dim: int, camera_nam
         slices[key] = {"start": offset, "end": offset + dim}
         offset += dim
 
-    action_slices = {"joint_position_delta": {"start": 0, "end": num_joints}}
+    # action key 与 state key "joint_pos" 一致（GR00T RELATIVE action 要求 state_key 匹配）
+    action_slices = {"joint_pos": {"start": 0, "end": num_joints}}
 
     video = {}
     for cam_name in camera_names:

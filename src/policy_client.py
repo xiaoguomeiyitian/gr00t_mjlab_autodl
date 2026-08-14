@@ -6,19 +6,50 @@ from typing import Any
 
 import msgpack
 import msgpack_numpy as mnp
+import numpy as np
 import zmq
 
 
 class _MsgSerializer:
-    """msgpack_numpy 序列化器（与 Isaac-GR00T PolicyServer 兼容）。"""
+    """msgpack_numpy 序列化器（与 Isaac-GR00T PolicyServer 兼容）。
+
+    对齐官方 gr00t.policy.server_client.MsgSerializer 的安全防护：
+    拒绝 object-dtype ndarray，避免 msgpack_numpy 走 pickle 路径。
+    """
 
     @staticmethod
     def to_bytes(data: Any) -> bytes:
-        return msgpack.packb(data, default=mnp.encode)
+        import functools
+
+        def _safe_encode(obj, chain=None):
+            if isinstance(obj, np.ndarray) and obj.dtype.kind == "O":
+                raise TypeError(
+                    f"Refusing to encode object-dtype ndarray (shape={obj.shape}); "
+                    f"msgpack_numpy would invoke pickle. Convert to a concrete "
+                    f"numeric dtype before sending."
+                )
+            return mnp.encode(obj, chain=chain)
+
+        default = functools.partial(_safe_encode, chain=None)
+        return msgpack.packb(data, default=default)
 
     @staticmethod
     def from_bytes(data: bytes) -> Any:
-        return msgpack.unpackb(data, object_hook=mnp.decode, raw=False)
+        import functools
+
+        def _safe_decode(obj, chain=None):
+            if isinstance(obj, dict):
+                nd_val = obj.get(b"nd", obj.get("nd"))
+                kind_val = obj.get(b"kind", obj.get("kind"))
+                if nd_val and kind_val in (b"O", "O"):
+                    raise ValueError(
+                        "Refusing to decode object-dtype ndarray payload (pickle-bearing); "
+                        "convert to a concrete numeric dtype before sending."
+                    )
+            return mnp.decode(obj, chain=chain)
+
+        object_hook = functools.partial(_safe_decode, chain=None)
+        return msgpack.unpackb(data, object_hook=object_hook, raw=False)
 
 
 class GR00TClient:

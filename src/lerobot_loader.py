@@ -70,9 +70,33 @@ class LeRobotEpisodeLoader:
         else:
             self.modality = {}
 
+        # 加载 stats.json（官方 LeRobotEpisodeLoader 强制要求）
+        # 本地实现为可选：存在时加载，不存在时跳过（推理时 stats 在服务端）
+        stats_path = self.meta_dir / "stats.json"
+        self.stats = {}
+        if stats_path.exists():
+            with open(stats_path, encoding="utf-8") as f:
+                self.stats = json.load(f)
+
+        relative_stats_path = self.meta_dir / "relative_stats.json"
+        if relative_stats_path.exists():
+            with open(relative_stats_path, encoding="utf-8") as f:
+                relative_stats = json.load(f)
+            relative_stats.pop("__fingerprints__", None)
+            self.stats["relative_action"] = relative_stats
+
         # 从 info.json 读取维度，避免硬编码
         self.state_dim = int(self.info.get("state_dim", 0)) or None
         self.action_dim = int(self.info.get("action_dim", 0)) or None
+
+        # 从 modality.json / info.json 提取 video keys（短 key，如 "front"）
+        # LeRobot v2 中视频是独立 mp4 文件，parquet 不含 observation.images.* 列，
+        # 因此不能依赖 parquet 列名查找相机，必须从 meta 获取。
+        self.video_keys = []
+        if self.modality.get("video"):
+            self.video_keys = list(self.modality["video"].keys())
+        elif self.info.get("features", {}).get("video", {}).get("keys"):
+            self.video_keys = self.info["features"]["video"]["keys"]
 
     def __len__(self) -> int:
         return len(self.episodes)
@@ -83,6 +107,7 @@ class LeRobotEpisodeLoader:
         return LeRobotEpisode(
             self.data_dir, self.videos_dir, self.episodes[idx],
             self.image_size, self.state_dim, self.action_dim,
+            video_keys=self.video_keys,
             tasks=self.tasks,
         )
 
@@ -99,6 +124,7 @@ class LeRobotEpisode:
         state_dim: Optional[int] = None,
         action_dim: Optional[int] = None,
         tasks: Optional[list] = None,
+        video_keys: Optional[list] = None,
     ):
         self.data_dir = data_dir
         self.videos_dir = videos_dir
@@ -108,6 +134,7 @@ class LeRobotEpisode:
         self._state_dim = state_dim
         self._action_dim = action_dim
         self.tasks = tasks or []
+        self.video_keys = video_keys or []
 
         self._load_data()
 
@@ -189,24 +216,32 @@ class LeRobotEpisode:
         row = self.df.iloc[idx]
 
         # 提取图像：从视频文件按帧读取
+        # LeRobot v2 中视频是独立 mp4，parquet 不含 observation.images.* 列，
+        # 因此从 self.video_keys（来自 modality.json/info.json）获取相机列表。
+        # 兼容：若 video_keys 为空，退化为从 parquet 列名查找。
         images = {}
-        image_cols = [c for c in self.df.columns
-                      if "image" in c.lower() or "video" in c.lower()]
-        for col in image_cols:
-            # 列名形如 observation.images.front
-            video_key = col.split(".")[-1] if "." in col else col
+        video_keys = self.video_keys
+        if not video_keys:
+            image_cols = [c for c in self.df.columns
+                          if "image" in c.lower() or "video" in c.lower()]
+            video_keys = [c.split(".")[-1] if "." in c else c for c in image_cols]
+        for video_key in video_keys:
             frame_idx = int(row.get("frame_index", idx))
             img = self._load_video_frame(video_key, frame_idx)
             if img is None:
-                # parquet 中可能存了占位，或无视频
-                placeholder = row[col]
-                if isinstance(placeholder, np.ndarray) and placeholder.size > 0:
-                    img = placeholder
-                else:
+                # parquet 中可能存了占位（列名含 image/video），尝试读取
+                col_candidates = [c for c in self.df.columns
+                                  if c.split(".")[-1] == video_key]
+                if col_candidates:
+                    placeholder = row[col_candidates[0]]
+                    if isinstance(placeholder, np.ndarray) and placeholder.size > 0:
+                        img = placeholder
+                if img is None:
                     img = np.zeros((self.image_size[0], self.image_size[1], 3), dtype=np.uint8)
             if img.shape[:2] != self.image_size:
                 img = cv2.resize(img, (self.image_size[1], self.image_size[0]))
-            images[col] = img
+            # 用短 key（如 "front"）而非完整列名，与 ObservationBuilder.camera_keys 对齐
+            images[video_key] = img
 
         # 提取状态：LeRobot v2 中 state 通常存为单列 observation.state（list）
         state = np.zeros(self._state_dim or 0, dtype=np.float32)

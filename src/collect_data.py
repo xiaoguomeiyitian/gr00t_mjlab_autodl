@@ -62,7 +62,7 @@ class DataCollector:
         self,
         robot: str = "g1",
         task: Optional[str] = None,
-        action_mode: str = "delta",
+        action_mode: str = "absolute",  # 存储绝对关节角，absolute→relative 由 GR00T processor 处理
         num_episodes: int = 50,
         episode_length: int = 300,
         fps: int = 30,
@@ -339,7 +339,7 @@ def main():
                         help="机器人类型")
     parser.add_argument("--task", type=str, default=None,
                         help="MJLab 任务名（默认从配置取）")
-    parser.add_argument("--action-mode", type=str, default="delta",
+    parser.add_argument("--action-mode", type=str, default="absolute",
                         choices=["absolute", "delta", "relative_eef"],
                         help="动作模式")
     parser.add_argument("--num-episodes", type=int, default=50,
